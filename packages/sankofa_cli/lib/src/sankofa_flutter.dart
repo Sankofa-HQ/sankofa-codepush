@@ -31,8 +31,14 @@ class SankofaFlutter {
   static const executable = 'flutter';
 
   /// The Sankofa Flutter fork git URL.
+  ///
+  /// Currently points at the upstream Shorebird Flutter fork
+  /// (Apache 2.0) — their open-source engine fork is what implements
+  /// the iOS binary-diff patching mechanism. We can mirror this to
+  /// our own org for self-maintenance later without changing customer
+  /// behavior; the consumer only sees `sankofa` everywhere else.
   static const String flutterGitUrl =
-      'https://github.com/sankofatech/flutter.git';
+      'https://github.com/shorebirdtech/flutter.git';
 
   /// Arguments to pass to `flutter precache`.
   List<String> get precacheArgs => ['--android', if (platform.isMacOS) '--ios'];

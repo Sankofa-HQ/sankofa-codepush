@@ -121,7 +121,7 @@ class Cache {
   String get storageBaseUrl => 'https://storage.googleapis.com';
 
   /// The storage bucket host.
-  String get storageBucket => 'download.sankofa.dev';
+  String get storageBucket => 'download.shorebird.dev';
 
   /// Clear the cache.
   Future<void> clear() async {

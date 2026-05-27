@@ -13,14 +13,14 @@ function update_flutter {
   if [[ -d "$FLUTTER_PATH" ]]; then
     git -C "$FLUTTER_PATH" fetch
   else
-    git clone --filter=tree:0 https://github.com/sankofatech/flutter.git --no-checkout "$FLUTTER_PATH"
+    git clone --filter=tree:0 https://github.com/shorebirdtech/flutter.git --no-checkout "$FLUTTER_PATH"
   fi
   # -c to avoid printing a warning about being in a detached head state.
   git -C "$FLUTTER_PATH" -c advice.detachedHead=false checkout "$FLUTTER_VERSION"
   SANKOFA_ENGINE_VERSION=`cat "$FLUTTER_PATH/bin/internal/engine.version"`
   echo "Sankofa Engine • revision $SANKOFA_ENGINE_VERSION"
   # Install Sankofa Flutter Artifacts
-  FLUTTER_STORAGE_BASE_URL=https://download.sankofa.dev $FLUTTER_PATH/bin/flutter --version
+  FLUTTER_STORAGE_BASE_URL=https://download.shorebird.dev $FLUTTER_PATH/bin/flutter --version
 }
 
 function pub_get_with_retry {
