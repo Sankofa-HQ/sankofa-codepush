@@ -1,0 +1,25 @@
+name: sankofa_code_push_example
+description: An example demonstrating how to use the sankofa_code_push package
+publish_to: "none"
+
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.5.4 <4.0.0"
+  flutter: ">=3.24.5"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  sankofa_code_push:
+    path: ../
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  very_good_analysis: ^7.0.0
+
+flutter:
+  assets:
+    - sankofa.yaml
+  uses-material-design: true

@@ -1,0 +1,18 @@
+Sankofa Code Push
+Copyright 2026 Sankofa-HQ
+
+This product is derived from Shorebird (https://shorebird.dev), copyright
+Shorebird Tech LLC, licensed under the Apache License, Version 2.0.
+The original copyright + license texts are preserved in LICENSE-APACHE,
+LICENSE-MIT, and COPYRIGHT.
+
+Modifications by Sankofa-HQ:
+  - Package + binary names renamed (shorebird → sankofa)
+  - Default server endpoints repointed to api.sankofa.dev
+  - Default OAuth issuer repointed to auth.sankofa.dev
+  - Integration with the Sankofa server's deploy module
+  - Subsequent bug fixes + feature additions (see git history)
+
+All upstream contributions (CLI architecture, Rust updater, protocol
+definitions) remain the work of the Shorebird Tech LLC team and their
+contributors. This fork stands on their shoulders.
