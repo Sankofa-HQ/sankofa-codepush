@@ -4,6 +4,7 @@ import 'package:scoped_deps/scoped_deps.dart';
 import 'package:sankofa_cli/src/auth/auth.dart';
 import 'package:sankofa_cli/src/logging/logging.dart';
 import 'package:sankofa_cli/src/platform.dart';
+import 'package:sankofa_cli/src/pubspec_editor.dart';
 import 'package:sankofa_cli/src/sankofa_env.dart';
 import 'package:sankofa_cli/src/validators/validators.dart';
 import 'package:sankofa_code_push_client/sankofa_code_push_client.dart';
@@ -114,6 +115,14 @@ To fix, update your pubspec.yaml to include the following:
 ''');
         throw SankofaNotInitializedException();
       }
+
+      // Engine compatibility: the Flutter engine binary still loads the
+      // code-push config from the asset named `shorebird.yaml`. Generate it
+      // from `sankofa.yaml` (the single source of truth) and ensure it's
+      // bundled, so the on-device updater gets its config. Both are no-ops
+      // when already in sync. Remove once the engine reads `sankofa.yaml`.
+      sankofaEnv.syncEngineConfigYaml();
+      pubspecEditor.ensureEngineConfigYamlAsset();
     }
 
     for (final validator in validators) {

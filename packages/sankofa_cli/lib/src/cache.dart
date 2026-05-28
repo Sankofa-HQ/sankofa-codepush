@@ -310,9 +310,13 @@ class AotToolsArtifact extends CachedArtifact {
     ),
   );
 
+  // Path segment stays `shorebird` — aot-tools.dill is upstream build
+  // tooling we fetch from Shorebird's public CDN (same as PatchArtifact
+  // below). Only Sankofa-owned surfaces are rebranded; the `/sankofa/`
+  // prefix 404s here, which silently disabled iOS AOT-linking patches.
   @override
   Future<String> get storageUrl async =>
-      '${cache.storageBaseUrl}/${cache.storageBucket}/sankofa/${sankofaEnv.sankofaEngineRevision}/$fileName';
+      '${cache.storageBaseUrl}/${cache.storageBucket}/shorebird/${sankofaEnv.sankofaEngineRevision}/$fileName';
 
   @override
   String? get checksum => null;
@@ -358,7 +362,11 @@ class PatchArtifact extends CachedArtifact {
       artifactName += 'windows-x64.zip';
     }
 
-    return '${cache.storageBaseUrl}/${cache.storageBucket}/sankofa/${sankofaEnv.sankofaEngineRevision}/$artifactName';
+    // Path segment stays `shorebird` — this is the upstream GCS bucket
+    // layout for the patch (aot-tools) executable, which we consume
+    // from Shorebird's public CDN. Only the Sankofa-owned surfaces are
+    // rebranded; build tooling we fetch from upstream keeps its path.
+    return '${cache.storageBaseUrl}/${cache.storageBucket}/shorebird/${sankofaEnv.sankofaEngineRevision}/$artifactName';
   }
 
   Future<bool> _supportsArm64Patch() async {

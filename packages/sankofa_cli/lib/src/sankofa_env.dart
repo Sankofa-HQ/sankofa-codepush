@@ -154,8 +154,15 @@ class SankofaEnv {
 
   /// Where the link supplement files are stored.
   // TODO(eseidel): Make this not iOS specific.
+  // Path segment stays `shorebird` — the (not-yet-rebranded) engine's
+  // gen_snapshot writes the patch link metadata (App.ct.link / App.ft.link /
+  // App.dt.link) into build/ios/shorebird. Reading `sankofa` here found
+  // nothing, so out.ct.link was never staged and iOS patch linking failed
+  // with "Unable to read file: build/out.ct.link". Mirrors the same fix in
+  // ArtifactManager.getReleaseSupplementDirectory. Remove once the engine
+  // writes to `sankofa`.
   Directory get iosSupplementDirectory =>
-      Directory(p.join(buildDirectory.path, 'ios', 'sankofa'));
+      Directory(p.join(buildDirectory.path, 'ios', 'shorebird'));
 
   /// The `sankofa.yaml` file for this project.
   File getSankofaYamlFile({required Directory cwd}) {
@@ -229,6 +236,44 @@ class SankofaEnv {
       return Pubspec.parse(yaml, lenient: true);
     } on Exception {
       return null;
+    }
+  }
+
+  /// Generates `shorebird.yaml` from `sankofa.yaml` for engine compatibility.
+  ///
+  /// The Flutter engine binary still loads the code-push config from the asset
+  /// named `shorebird.yaml` (it predates the Sankofa rebrand and hasn't been
+  /// rebuilt yet). `sankofa.yaml` stays the single source of truth the customer
+  /// edits; this writes a byte-identical `shorebird.yaml` next to it — a
+  /// generated build artifact, gitignored — so the on-device updater receives
+  /// its config. Idempotent; remove once the engine reads `sankofa.yaml`.
+  void syncEngineConfigYaml() {
+    final root = getSankofaProjectRoot();
+    if (root == null) return;
+    final source = getSankofaYamlFile(cwd: root);
+    if (!source.existsSync()) return;
+
+    final desired = source.readAsStringSync();
+    final engineYaml = File(p.join(root.path, 'shorebird.yaml'));
+    if (!engineYaml.existsSync() || engineYaml.readAsStringSync() != desired) {
+      engineYaml.writeAsStringSync(desired);
+    }
+
+    // Keep the generated file out of version control.
+    final gitignore = File(p.join(root.path, '.gitignore'));
+    if (gitignore.existsSync()) {
+      final hasEntry = gitignore
+          .readAsLinesSync()
+          .any((line) => line.trim() == 'shorebird.yaml');
+      if (!hasEntry) {
+        final existing = gitignore.readAsStringSync().trimRight();
+        gitignore.writeAsStringSync(
+          '$existing\n\n'
+          '# Generated engine code-push config '
+          '(source of truth is sankofa.yaml)\n'
+          'shorebird.yaml\n',
+        );
+      }
     }
   }
 
