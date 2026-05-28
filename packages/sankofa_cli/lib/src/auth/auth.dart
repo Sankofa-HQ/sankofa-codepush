@@ -353,8 +353,13 @@ class Auth {
       final trimmed = envToken.trim();
       logger.detail('[env] $sankofaTokenEnvVar detected');
 
-      // New API key format — pass through directly, no refresh needed.
-      if (trimmed.startsWith('sb_api_')) {
+      // API key format — pass through directly, no refresh needed.
+      // Sankofa accepts: sb_api_ (upstream Shorebird legacy), sa_api_
+      // (renamed namespace), and sk_deploy_ (Sankofa's existing deploy
+      // tokens — what `sankofa-cli login --deploy-token` mints).
+      if (trimmed.startsWith('sb_api_') ||
+          trimmed.startsWith('sa_api_') ||
+          trimmed.startsWith('sk_deploy_')) {
         _apiKey = trimmed;
         logger.detail('[env] $sankofaTokenEnvVar parsed as API key');
         return;
@@ -374,7 +379,7 @@ class Auth {
         logger
           ..err(
             'Failed to parse $sankofaTokenEnvVar. Expected an API key '
-            '(sb_api_...) or a legacy CI token.',
+            '(sk_deploy_..., sa_api_..., sb_api_...) or a legacy CI token.',
           )
           ..detail(e.toString());
         rethrow;
