@@ -75,10 +75,16 @@ Map<String, String>? buildEnvironment({
 }) {
   final env = <String, String>{};
   if (base64PublicKey != null) {
-    env['SANKOFA_PUBLIC_KEY'] = base64PublicKey;
+    // Key name stays `SHOREBIRD_*` — these are read by the (not-yet-rebranded)
+    // engine's flutter_tools, which look up `SHOREBIRD_PUBLIC_KEY` /
+    // `SHOREBIRD_DD_MAX_BYTES` verbatim. Setting `SANKOFA_*` was silently
+    // ignored by the engine, so inline patch-signature verification and the
+    // DD byte-budget never took effect. Remove once the engine reads
+    // `SANKOFA_*`.
+    env['SHOREBIRD_PUBLIC_KEY'] = base64PublicKey;
   }
   if (ddMaxBytes != null) {
-    env['SANKOFA_DD_MAX_BYTES'] = ddMaxBytes.toString();
+    env['SHOREBIRD_DD_MAX_BYTES'] = ddMaxBytes.toString();
   }
   return env.isEmpty ? null : env;
 }
