@@ -598,6 +598,12 @@ Building patch with Flutter $flutterVersionString
           track: track,
           artifacts: patchArtifactBundles,
         );
+
+        logger.success(
+          '''
+✓ Patch published to release ${release.version} on track ${track.channel}.
+  Devices on this release will receive the patch on next app launch.''',
+        );
       },
       values: {sankofaEnvRef.overrideWith(() => releaseFlutterSankofaEnv)},
     );

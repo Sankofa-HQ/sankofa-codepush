@@ -188,6 +188,9 @@ To upload to the App Store, do one of the following:
     2. Drag and drop the ${lightCyan.wrap(ipaSearchString)} bundle into the Apple Transporter macOS app (https://apps.apple.com/us/app/transporter/id1450874784).
     3. Run ${lightCyan.wrap('xcrun altool --upload-app --type ios -f $ipaSearchString --apiKey your_api_key --apiIssuer your_issuer_id')}.
        See "man altool" for details about how to authenticate with the App Store Connect API key.
+
+${styleBold.wrap('IMPORTANT — uncheck "Manage Version and Build Number" in the Xcode Distribute App dialog.')}
+If left checked, Xcode will rewrite the build number in the uploaded binary, so the version that ships to the App Store will not match the one Sankofa recorded for this release, and patches will silently fail to apply on installed devices.
 ''';
     } else {
       return '''
