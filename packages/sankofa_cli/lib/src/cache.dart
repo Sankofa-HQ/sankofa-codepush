@@ -118,10 +118,13 @@ class Cache {
   final List<CachedArtifact> _artifacts = [];
 
   /// The storage base url.
-  String get storageBaseUrl => 'https://storage.googleapis.com';
+  String get storageBaseUrl => 'https://cdn.sankofa.cloud';
 
   /// The storage bucket host.
-  String get storageBucket => 'download.shorebird.dev';
+  ///
+  /// Empty for Sankofa: artifacts are served directly under [storageBaseUrl].
+  /// (Shorebird used a bucket prefix; we own the CDN root and don't need one.)
+  String get storageBucket => '';
 
   /// Clear the cache.
   Future<void> clear() async {
@@ -310,13 +313,13 @@ class AotToolsArtifact extends CachedArtifact {
     ),
   );
 
-  // Path segment stays `shorebird` — aot-tools.dill is upstream build
-  // tooling we fetch from Shorebird's public CDN (same as PatchArtifact
-  // below). Only Sankofa-owned surfaces are rebranded; the `/sankofa/`
-  // prefix 404s here, which silently disabled iOS AOT-linking patches.
   @override
-  Future<String> get storageUrl async =>
-      '${cache.storageBaseUrl}/${cache.storageBucket}/shorebird/${sankofaEnv.sankofaEngineRevision}/$fileName';
+  Future<String> get storageUrl async {
+    final base = cache.storageBaseUrl;
+    final bucket = cache.storageBucket;
+    final prefix = bucket.isEmpty ? base : '$base/$bucket';
+    return '$prefix/sankofa/${sankofaEnv.sankofaEngineRevision}/$fileName';
+  }
 
   @override
   String? get checksum => null;
@@ -362,11 +365,10 @@ class PatchArtifact extends CachedArtifact {
       artifactName += 'windows-x64.zip';
     }
 
-    // Path segment stays `shorebird` — this is the upstream GCS bucket
-    // layout for the patch (aot-tools) executable, which we consume
-    // from Shorebird's public CDN. Only the Sankofa-owned surfaces are
-    // rebranded; build tooling we fetch from upstream keeps its path.
-    return '${cache.storageBaseUrl}/${cache.storageBucket}/shorebird/${sankofaEnv.sankofaEngineRevision}/$artifactName';
+    final base = cache.storageBaseUrl;
+    final bucket = cache.storageBucket;
+    final prefix = bucket.isEmpty ? base : '$base/$bucket';
+    return '$prefix/sankofa/${sankofaEnv.sankofaEngineRevision}/$artifactName';
   }
 
   Future<bool> _supportsArm64Patch() async {

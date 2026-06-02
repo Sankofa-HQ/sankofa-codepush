@@ -32,13 +32,14 @@ class SankofaFlutter {
 
   /// The Sankofa Flutter fork git URL.
   ///
-  /// Currently points at the upstream Shorebird Flutter fork
-  /// (Apache 2.0) — their open-source engine fork is what implements
-  /// the iOS binary-diff patching mechanism. We can mirror this to
-  /// our own org for self-maintenance later without changing customer
-  /// behavior; the consumer only sees `sankofa` everywhere else.
+  /// Points at the Sankofa Flutter fork
+  /// (https://github.com/Sankofa-HQ/sankofa-flutter). This is our own
+  /// engine fork — built from upstream Flutter 3.44.0 + Sankofa Dart
+  /// modifications (dynamic-modules default, annotate-privates flag,
+  /// +sankofa-1 marker). The iOS binary-diff patching mechanism will
+  /// land here as Phase 1 of the own-engine roadmap.
   static const String flutterGitUrl =
-      'https://github.com/shorebirdtech/flutter.git';
+      'https://github.com/Sankofa-HQ/sankofa-flutter.git';
 
   /// Arguments to pass to `flutter precache`.
   List<String> get precacheArgs => ['--android', if (platform.isMacOS) '--ios'];

@@ -21,17 +21,13 @@ class PubspecEditor {
     _ensureAsset('sankofa.yaml');
   }
 
-  /// Ensures the engine code-push config asset (`shorebird.yaml`) is listed
+  /// Ensures the engine code-push config asset (`sankofa.yaml`) is listed
   /// in the pubspec assets so it gets bundled into the app.
   ///
-  /// The Flutter engine binary still loads the code-push config from the asset
-  /// named `shorebird.yaml` (it predates the Sankofa rebrand and hasn't been
-  /// rebuilt yet). `sankofa.yaml` remains the single source of truth the
-  /// customer edits; [SankofaEnv.syncEngineConfigYaml] writes a byte-identical
-  /// generated `shorebird.yaml`, and this bundles it. Remove once the engine
-  /// reads `sankofa.yaml` directly. Idempotent.
+  /// `sankofa.yaml` is the single source of truth the customer edits; our
+  /// Sankofa-built Flutter engine reads it at startup. Idempotent.
   void ensureEngineConfigYamlAsset() {
-    _ensureAsset('shorebird.yaml');
+    _ensureAsset('sankofa.yaml');
   }
 
   /// Adds [asset] to `flutter.assets` in pubspec.yaml if not already present.

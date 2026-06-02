@@ -266,7 +266,7 @@ $stderr''');
     if (executable == 'flutter') {
       // If this ever changes we also need to update the `sankofa` shell
       // wrapper which downloads runs Flutter to fetch artifacts the first time.
-      return {'FLUTTER_STORAGE_BASE_URL': 'https://download.shorebird.dev'};
+      return {'FLUTTER_STORAGE_BASE_URL': 'https://cdn.sankofa.cloud'};
     }
 
     return {};

@@ -379,13 +379,13 @@ class ArtifactManager {
   }) {
     final projectRoot = sankofaEnv.getSankofaProjectRoot();
     if (projectRoot == null) return null;
-    // Path segment stays `shorebird` — the (not-yet-rebranded) engine's
-    // gen_snapshot writes the AOT link metadata (App.ct.link / App.dt.link /
-    // App.ft.link) into build/<platform>/shorebird. Reading `sankofa` here
-    // found nothing, so the ios_supplement was never uploaded and iOS
-    // patch linking failed. Remove once the engine writes to `sankofa`.
+    // Sankofa-built engine's gen_snapshot writes AOT link metadata
+    // (App.ct.link / App.dt.link / App.ft.link) into build/<platform>/sankofa
+    // once Phase 1 codepush patches land. Function returns null gracefully
+    // if the dir doesn't exist (e.g. Phase 0 builds where supplements aren't
+    // generated yet).
     final releaseSupplementDir = Directory(
-      p.join(projectRoot.path, 'build', platformSubdir, 'shorebird'),
+      p.join(projectRoot.path, 'build', platformSubdir, 'sankofa'),
     );
 
     if (!releaseSupplementDir.existsSync()) {

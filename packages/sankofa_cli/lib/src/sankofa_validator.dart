@@ -116,12 +116,9 @@ To fix, update your pubspec.yaml to include the following:
         throw SankofaNotInitializedException();
       }
 
-      // Engine compatibility: the Flutter engine binary still loads the
-      // code-push config from the asset named `shorebird.yaml`. Generate it
-      // from `sankofa.yaml` (the single source of truth) and ensure it's
-      // bundled, so the on-device updater gets its config. Both are no-ops
-      // when already in sync. Remove once the engine reads `sankofa.yaml`.
-      sankofaEnv.syncEngineConfigYaml();
+      // The Sankofa-built Flutter engine reads `sankofa.yaml` directly.
+      // Ensure it's listed as a Flutter asset so it's bundled into the app.
+      // Idempotent.
       pubspecEditor.ensureEngineConfigYamlAsset();
     }
 
