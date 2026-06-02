@@ -118,7 +118,7 @@ class Cache {
   final List<CachedArtifact> _artifacts = [];
 
   /// The storage base url.
-  String get storageBaseUrl => 'https://cdn.sankofa.cloud';
+  String get storageBaseUrl => 'https://download.sankofa.dev';
 
   /// The storage bucket host.
   ///

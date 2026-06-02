@@ -40,7 +40,7 @@ class NetworkChecker {
     'https://console.sankofa.dev',
     'https://oauth2.googleapis.com',
     'https://storage.googleapis.com',
-    'https://cdn.sankofa.cloud',
+    'https://download.sankofa.dev',
   ].map(Uri.parse).toList();
 
   /// Verify that each of [urlsToCheck] responds to an HTTP GET request.

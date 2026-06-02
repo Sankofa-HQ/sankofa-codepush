@@ -20,7 +20,7 @@ function update_flutter {
   SANKOFA_ENGINE_VERSION=`cat "$FLUTTER_PATH/bin/internal/engine.version"`
   echo "Sankofa Engine • revision $SANKOFA_ENGINE_VERSION"
   # Install Sankofa Flutter Artifacts
-  FLUTTER_STORAGE_BASE_URL=https://cdn.sankofa.cloud $FLUTTER_PATH/bin/flutter --version
+  FLUTTER_STORAGE_BASE_URL=https://download.sankofa.dev $FLUTTER_PATH/bin/flutter --version
 }
 
 function pub_get_with_retry {
