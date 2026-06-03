@@ -264,7 +264,30 @@ git update-ref refs/remotes/origin/flutter_release/3.44.0 dbdbed7892aac296d5fdc4
 
 ---
 
-## 7. End-to-end release flow
+## 7. Push engine artifacts to the public CDN
+
+After a fresh engine build, upload the artifacts to `download.sankofa.dev`
+(B2 bucket `sankofa-public-engine` fronted by a Cloudflare Worker) so
+customer builds can fetch them over HTTPS:
+
+```bash
+# Reads B2_ENGINE_KEY_ID + B2_ENGINE_APP_KEY from server/engine/.env.
+sankofa-flutter/engine/scripts/upload-to-b2.sh
+```
+
+The script uploads ~95 MB (Android Maven JARs + POMs, iOS
+Flutter.framework.zip + gen_snapshot_arm64). Run it once per engine
+revision. URLs end up at e.g.
+`https://download.sankofa.dev/download.flutter.io/io/flutter/.../*.{pom,jar}`.
+
+If you ever update an artifact for the same engine.version (e.g. POM
+metadata fix), purge Cloudflare cache too — the Worker has 24-hour
+caching. Dashboard → Caching → Purge Everything is the blunt
+instrument; per-URL purge is the precise one.
+
+---
+
+## 8. End-to-end release flow
 
 ```bash
 cd flutter-deploy/hello_codepush
@@ -275,17 +298,21 @@ export PATH=/Users/$(whoami)/Developer/Projects/Sankofa/flutter-deploy/sankofa-c
 # Auth — load token from credentials.json (sankofa login already done)
 export SANKOFA_TOKEN=$(python3 -c "import json; print(json.load(open('$HOME/Library/Application Support/sankofa/credentials.json'))['token'])")
 
-# Release
+# Release (Gradle fetches engine JARs from download.sankofa.dev automatically)
 sankofa release ios --flutter-version=3.44.0
+sankofa release android --flutter-version=3.44.0 --target-platform=android-arm64
 
 # Preview (install + launch on connected device)
-DEVICE_ID=$(xcrun xctrace list devices 2>&1 | grep "iPhone (" | head -1 | grep -oE "[A-F0-9-]+\)" | tr -d ')')
-sankofa preview --platform=ios --release-version=<version> --device-id=$DEVICE_ID
+IOS_ID=$(xcrun xctrace list devices 2>&1 | grep "iPhone (" | head -1 | grep -oE "[A-F0-9-]+\)" | tr -d ')')
+sankofa preview --platform=ios --release-version=<version> --device-id=$IOS_ID
+
+ANDROID_ID=$(adb devices | awk 'NR>1 && $2=="device"{print $1; exit}')
+sankofa preview --platform=android --release-version=<version> --device-id=$ANDROID_ID
 ```
 
 ---
 
-## 8. What's broken / what's next
+## 9. What's broken / what's next
 
 | Operation | State | Blocker |
 |---|---|---|
@@ -298,7 +325,7 @@ Phase 1 application plan: `engine/codepush-extraction/phase1-application-order.m
 
 ---
 
-## 9. Useful debugging
+## 10. Useful debugging
 
 ```bash
 # Check engine binary identity
@@ -324,17 +351,17 @@ tail -f /tmp/sankofa-release-ios.log
 
 ---
 
-## 10. Domains + infrastructure
+## 11. Domains + infrastructure
 
 - `api.sankofa.dev` — auth API (SANKOFA_TOKEN required). Customer's source of truth for releases + patches.
-- `download.sankofa.dev` — public B2 bucket (CNAME) for engine + codepush artifacts. **Bucket setup deferred** — set up when first external customer needs it. Until then, all artifacts come from local symlinks per §6.
+- `download.sankofa.dev` — public B2 bucket `sankofa-public-engine` fronted by a Cloudflare Worker (free tier — Workers > sankofa-engine-proxy). Origin: `s3.eu-central-003.backblazeb2.com`. CORS open. ~95 MB uploaded per engine.version via `sankofa-flutter/engine/scripts/upload-to-b2.sh`. See §7.
 - `console.sankofa.dev` — customer-facing web console (auth + admin).
 
 Never invent new domains. If you need an artifact URL the founder hasn't authorized, ask first.
 
 ---
 
-## 11. Open-core monetization model (mirrors Shorebird)
+## 12. Open-core monetization model (mirrors Shorebird)
 
 **Public, anonymous-downloadable:** CLI, Flutter SDK fork, engine binaries, aot-tools.dill, patch binary. Apache 2.0; can't be closed anyway.
 
