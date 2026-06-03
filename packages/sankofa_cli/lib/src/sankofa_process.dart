@@ -264,9 +264,15 @@ $stderr''');
 
   Map<String, String> _environmentOverrides({required String executable}) {
     if (executable == 'flutter') {
-      // If this ever changes we also need to update the `sankofa` shell
-      // wrapper which downloads runs Flutter to fetch artifacts the first time.
-      return {'FLUTTER_STORAGE_BASE_URL': 'https://download.sankofa.dev'};
+      // Honor a shell-level FLUTTER_STORAGE_BASE_URL override (useful for
+      // local dev with a Python http.server proxy or a non-prod CDN). The
+      // production default is https://download.sankofa.dev — keep that
+      // matching the same constant in third_party/flutter/bin/internal/
+      // shared.sh and packages/sankofa_cli/lib/src/cache.dart.
+      final override = Platform.environment['FLUTTER_STORAGE_BASE_URL'];
+      return {
+        'FLUTTER_STORAGE_BASE_URL': override ?? 'https://download.sankofa.dev',
+      };
     }
 
     return {};
