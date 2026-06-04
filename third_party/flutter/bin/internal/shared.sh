@@ -15,8 +15,35 @@ function update_flutter {
   else
     git clone --filter=tree:0 https://github.com/Sankofa-HQ/sankofa-flutter.git --no-checkout "$FLUTTER_PATH"
   fi
-  # -c to avoid printing a warning about being in a detached head state.
-  git -C "$FLUTTER_PATH" -c advice.detachedHead=false checkout "$FLUTTER_VERSION"
+
+  # Branch-aware checkout — Sankofa fork.
+  #
+  # Engine-fork hackers (us, and any customer who patches the Flutter SDK)
+  # work on feature branches based on top of the pinned $FLUTTER_VERSION
+  # commit. The original behaviour here unconditionally did
+  #   git checkout $FLUTTER_VERSION
+  # which detaches HEAD off whatever branch the user was on, silently
+  # discarding their place in their own work and risking commits-on-
+  # detached-HEAD data loss.
+  #
+  # Skip the checkout when the current HEAD already includes the pinned
+  # revision (i.e. $FLUTTER_VERSION is an ancestor of HEAD). The engine
+  # build only needs $FLUTTER_VERSION's tree to exist somewhere reachable
+  # from HEAD, which it does on any descendant branch.
+  #
+  # Override with SANKOFA_FORCE_FLUTTER_CHECKOUT=1 if you really do want
+  # to snap the SDK back to the pinned commit.
+  if [[ "${SANKOFA_FORCE_FLUTTER_CHECKOUT:-0}" != "1" ]] \
+       && git -C "$FLUTTER_PATH" merge-base --is-ancestor \
+            "$FLUTTER_VERSION" HEAD 2>/dev/null; then
+    current_ref=$(git -C "$FLUTTER_PATH" symbolic-ref --short -q HEAD 2>/dev/null \
+                  || git -C "$FLUTTER_PATH" rev-parse --short HEAD)
+    >&2 echo "Sankofa Flutter • staying on $current_ref (ahead of pinned $FLUTTER_VERSION)"
+  else
+    # -c to avoid printing a warning about being in a detached head state.
+    git -C "$FLUTTER_PATH" -c advice.detachedHead=false checkout "$FLUTTER_VERSION"
+  fi
+
   SANKOFA_ENGINE_VERSION=`cat "$FLUTTER_PATH/bin/internal/engine.version"`
   echo "Sankofa Engine • revision $SANKOFA_ENGINE_VERSION"
   # Install Sankofa Flutter Artifacts
