@@ -391,14 +391,34 @@ class Auth {
 
     final credentialsFile = File(credentialsFilePath);
     if (credentialsFile.existsSync()) {
+      final contents = credentialsFile.readAsStringSync();
+      // Sankofa's deploy_token credentials file shape:
+      //   {"token":"sk_deploy_…","authType":"deploy_token","endpoint":…,
+      //    "projectId":…,"environment":…,"sessionJwt":…}
+      // Detect that first — googleapis_auth's AccessCredentials.fromJson
+      // throws a TypeError (not an Exception subclass) when fed our shape,
+      // and the previous `on Exception` swallow let it escape and bubble.
       try {
-        final contents = credentialsFile.readAsStringSync();
-        _credentials = oauth2.AccessCredentials.fromJson(
-          json.decode(contents) as Map<String, dynamic>,
-        );
-        _email = _credentials?.email;
+        final decoded = json.decode(contents);
+        if (decoded is Map<String, dynamic>) {
+          final authType = decoded['authType'] as String?;
+          final token = decoded['token'] as String?;
+          if (authType == 'deploy_token' &&
+              token != null &&
+              token.startsWith('sk_deploy_')) {
+            _apiKey = token;
+            logger.detail('[disk] deploy_token credentials loaded');
+            return;
+          }
+          _credentials = oauth2.AccessCredentials.fromJson(decoded);
+          _email = _credentials?.email;
+        }
       } on Exception {
-        // Swallow json decode exceptions.
+        // Swallow json decode failures.
+      } on TypeError {
+        // AccessCredentials.fromJson throws TypeError (extends Error, NOT
+        // Exception) when the JSON shape doesn't match — eat it so a stale
+        // or foreign credentials file doesn't crash the CLI.
       }
     }
   }

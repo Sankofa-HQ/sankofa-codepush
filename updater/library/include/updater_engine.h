@@ -92,8 +92,8 @@ SANKOFA_EXPORT void sankofa_free_string(const char *c_string);
  */
 SANKOFA_EXPORT
 bool sankofa_init(const struct AppParameters *c_params,
-                    struct FileCallbacks c_file_callbacks,
-                    const char *c_yaml);
+                  struct FileCallbacks c_file_callbacks,
+                  const char *c_yaml);
 
 /**
  * Returns if the app should run the updater automatically on launch.
