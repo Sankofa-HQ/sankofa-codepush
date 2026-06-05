@@ -287,42 +287,94 @@ allowed to access $url.''');
 }
 
 /// {@template aot_tools_artifact}
-/// The aot_tools.dill artifact.
-/// Used for linking and generating optimized AOT snapshots.
+/// The aot_tools artifact — Sankofa's drop-in for the closed
+/// aot-tools.dill that Shorebird's CLI fetched from
+/// download.shorebird.dev. Bundled with the CLI checkout at
+/// `third_party/aot_tools/bin/aot_tools.dart`; never downloaded.
+///
+/// Detected by extension downstream in
+/// `executables/aot_tools.dart::_exec` — `.dart` files run via
+/// `dart run <path>`.
 /// {@endtemplate}
 class AotToolsArtifact extends CachedArtifact {
   /// {@macro aot_tools_artifact}
   AotToolsArtifact({required super.cache, required super.platform});
 
   @override
-  String get fileName => 'aot-tools.dill';
+  String get fileName => 'aot_tools.dart';
 
   @override
   bool get isExecutable => false;
 
-  /// The aot-tools are only available for revisions that support mixed-mode.
+  /// Bundled with the repo; no download required.
   @override
   bool get required => false;
 
+  /// Returns the bundled Dart entry point shipped under the sankofa
+  /// CLI repo root. `sankofaEnv.sankofaRoot` resolves to the
+  /// `sankofa-codepush` repo (bin/cache lives two levels deep from
+  /// this script, so sankofaRoot is the repo root).
   @override
   File get file => File(
     p.join(
-      cache.getArtifactDirectory(fileName).path,
-      sankofaEnv.sankofaEngineRevision,
-      fileName,
+      sankofaEnv.sankofaRoot.path,
+      'third_party',
+      'aot_tools',
+      'bin',
+      'aot_tools.dart',
     ),
   );
 
+  /// Never downloaded — the file is bundled with the CLI repo.
   @override
-  Future<String> get storageUrl async {
-    final base = cache.storageBaseUrl;
-    final bucket = cache.storageBucket;
-    final prefix = bucket.isEmpty ? base : '$base/$bucket';
-    return '$prefix/sankofa/${sankofaEnv.sankofaEngineRevision}/$fileName';
-  }
+  Future<String> get storageUrl async => '';
 
   @override
   String? get checksum => null;
+
+  /// Valid when both the bundled .dart entry point AND its resolved
+  /// package config exist. `.dart_tool/` is gitignored, so a fresh
+  /// clone needs `dart pub get` once before `dart run` can resolve
+  /// imports — handled by [update] below.
+  @override
+  Future<bool> isValid() async {
+    if (!file.existsSync()) return false;
+    final packageConfig = File(
+      p.join(
+        file.parent.parent.path,
+        '.dart_tool',
+        'package_config.json',
+      ),
+    );
+    return packageConfig.existsSync();
+  }
+
+  /// Ensures the bundled `aot_tools` package is resolved (`dart pub
+  /// get`). The .dart source itself is shipped in the repo and never
+  /// downloaded.
+  @override
+  Future<void> update() async {
+    if (!file.existsSync()) {
+      throw const CacheUpdateFailure(
+        'Bundled aot_tools.dart is missing. Re-clone the sankofa-codepush '
+        'repo or run `git checkout third_party/aot_tools` to restore it.',
+      );
+    }
+    final pkgDir = file.parent.parent.path;
+    final progress = logger.progress('Resolving aot_tools dependencies...');
+    final result = await process.run(
+      sankofaEnv.dartBinaryFile.path,
+      ['pub', 'get'],
+      workingDirectory: pkgDir,
+    );
+    if (result.exitCode != 0) {
+      progress.fail();
+      throw CacheUpdateFailure(
+        '`dart pub get` failed in $pkgDir:\n${result.stderr}',
+      );
+    }
+    progress.complete();
+  }
 }
 
 /// {@template patch_artifact}

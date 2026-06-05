@@ -30,9 +30,12 @@ void main() {
       );
     }
 
+    late Directory sankofaRoot;
+
     setUp(() {
       cache = MockCache();
       final tmpDir = Directory.systemTemp.createTempSync();
+      sankofaRoot = tmpDir;
       flutterDirectory = Directory(p.join(tmpDir.path, 'flutter'))
         ..createSync(recursive: true);
       artifactDirectory = Directory(p.join(tmpDir.path, 'artifacts'))
@@ -44,65 +47,29 @@ void main() {
         () => cache.getArtifactDirectory(any()),
       ).thenReturn(artifactDirectory);
       when(() => sankofaEnv.flutterDirectory).thenReturn(flutterDirectory);
+      when(() => sankofaEnv.sankofaRoot).thenReturn(sankofaRoot);
       when(
         () => sankofaEnv.sankofaEngineRevision,
       ).thenReturn(engineRevision);
     });
 
     group('getArtifactPath', () {
-      group('aot-tools', () {
-        const aotToolsKernel = 'aot-tools.dill';
-        const aotToolsExe = 'aot-tools';
-        late String aotToolsKernelPath;
-        late String aotToolsExePath;
-
-        setUp(() {
-          aotToolsKernelPath = p.join(
-            artifactDirectory.path,
-            engineRevision,
-            aotToolsKernel,
-          );
-          aotToolsExePath = p.join(
-            artifactDirectory.path,
-            engineRevision,
-            aotToolsExe,
-          );
-        });
-
-        group('when kernel and executable are present', () {
-          setUp(() {
-            File(aotToolsKernelPath).createSync(recursive: true);
-            File(aotToolsExePath).createSync(recursive: true);
-          });
-
-          test('returns path to kernel file', () async {
-            expect(
-              runWithOverrides(
-                () => artifacts.getArtifactPath(
-                  artifact: SankofaArtifact.aotTools,
-                ),
-              ),
-              equals(aotToolsKernelPath),
-            );
-          });
-        });
-
-        group('when only executable is present', () {
-          setUp(() {
-            File(aotToolsExePath).createSync(recursive: true);
-          });
-
-          test('returns path to executable file', () {
-            expect(
-              runWithOverrides(
-                () => artifacts.getArtifactPath(
-                  artifact: SankofaArtifact.aotTools,
-                ),
-              ),
-              equals(aotToolsExePath),
-            );
-          });
-        });
+      test('returns the bundled aot_tools.dart path under sankofaRoot', () {
+        expect(
+          runWithOverrides(
+            () =>
+                artifacts.getArtifactPath(artifact: SankofaArtifact.aotTools),
+          ),
+          equals(
+            p.join(
+              sankofaRoot.path,
+              'third_party',
+              'aot_tools',
+              'bin',
+              'aot_tools.dart',
+            ),
+          ),
+        );
       });
 
       test('returns correct path for iOS gen_snapshot', () {

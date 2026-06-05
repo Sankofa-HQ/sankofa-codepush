@@ -100,6 +100,18 @@ void main() {
       ).thenAnswer((_) async => null);
 
       sankofaRoot = Directory.systemTemp.createTempSync();
+      // Match the on-disk layout AotToolsArtifact expects so isValid()
+      // short-circuits and no download/pub-get runs in these tests.
+      File(
+        p.join(sankofaRoot.path, 'third_party', 'aot_tools', 'bin',
+            'aot_tools.dart'),
+      ).createSync(recursive: true);
+      File(
+        p.join(sankofaRoot.path, 'third_party', 'aot_tools', '.dart_tool',
+            'package_config.json'),
+      )
+        ..createSync(recursive: true)
+        ..writeAsStringSync('{}');
       when(
         () => artifactManager.extractZip(
           zipFile: any(named: 'zipFile'),
@@ -357,32 +369,18 @@ void main() {
           );
         });
 
-        test('skips optional artifacts if a 404 is returned', () async {
-          when(() => httpClient.send(any())).thenAnswer((invocation) async {
-            final request =
-                invocation.positionalArguments.first as http.BaseRequest;
-            final fileName = p.basename(request.url.path);
-            if (fileName.startsWith('aot-tools')) {
-              return http.StreamedResponse(
-                const Stream.empty(),
-                HttpStatus.notFound,
-                reasonPhrase: 'Not Found',
-              );
-            }
-            return http.StreamedResponse(
-              Stream.value(ZipEncoder().encode(Archive())),
-              HttpStatus.ok,
-            );
-          });
+        test('aot_tools is bundled — never hits httpClient', () async {
           await expectLater(
             runWithOverrides(() => cache.updateAll(Duration.zero)),
             completes,
           );
-          verify(
-            () => logger.detail(
-              '''[cache] optional artifact: "aot-tools.dill" was not found, skipping...''',
-            ),
-          ).called(1);
+          final requests = verify(
+            () => httpClient.send(captureAny()),
+          ).captured.cast<http.BaseRequest>().map((r) => r.url.path).toList();
+          expect(
+            requests.any((p) => p.contains('aot-tools') || p.contains('aot_tools')),
+            isFalse,
+          );
         });
 
         test('downloads correct artifacts', () async {
@@ -453,13 +451,17 @@ void main() {
             () => httpClient.send(captureAny()),
           ).captured.cast<http.BaseRequest>().map((r) => r.url).toList();
 
-          String perEngine(String name) =>
-              '${cache.storageBaseUrl}/${cache.storageBucket}/sankofa/$sankofaEngineRevision/$name';
+          String perEngine(String name) {
+            final bucket = cache.storageBucket;
+            final prefix = bucket.isEmpty
+                ? cache.storageBaseUrl
+                : '${cache.storageBaseUrl}/$bucket';
+            return '$prefix/sankofa/$sankofaEngineRevision/$name';
+          }
 
           final expected = [
             perEngine('patch-darwin-x64.zip'),
             'https://github.com/google/bundletool/releases/download/1.18.1/bundletool-all-1.18.1.jar',
-            perEngine('aot-tools.dill'),
           ].map(Uri.parse).toList();
 
           expect(requests, equals(expected));
@@ -477,13 +479,17 @@ void main() {
             () => httpClient.send(captureAny()),
           ).captured.cast<http.BaseRequest>().map((r) => r.url).toList();
 
-          String perEngine(String name) =>
-              '${cache.storageBaseUrl}/${cache.storageBucket}/sankofa/$sankofaEngineRevision/$name';
+          String perEngine(String name) {
+            final bucket = cache.storageBucket;
+            final prefix = bucket.isEmpty
+                ? cache.storageBaseUrl
+                : '${cache.storageBaseUrl}/$bucket';
+            return '$prefix/sankofa/$sankofaEngineRevision/$name';
+          }
 
           final expected = [
             perEngine('patch-windows-x64.zip'),
             'https://github.com/google/bundletool/releases/download/1.18.1/bundletool-all-1.18.1.jar',
-            perEngine('aot-tools.dill'),
           ].map(Uri.parse).toList();
 
           expect(requests, equals(expected));
@@ -501,13 +507,17 @@ void main() {
             () => httpClient.send(captureAny()),
           ).captured.cast<http.BaseRequest>().map((r) => r.url).toList();
 
-          String perEngine(String name) =>
-              '${cache.storageBaseUrl}/${cache.storageBucket}/sankofa/$sankofaEngineRevision/$name';
+          String perEngine(String name) {
+            final bucket = cache.storageBucket;
+            final prefix = bucket.isEmpty
+                ? cache.storageBaseUrl
+                : '${cache.storageBaseUrl}/$bucket';
+            return '$prefix/sankofa/$sankofaEngineRevision/$name';
+          }
 
           final expected = [
             perEngine('patch-linux-x64.zip'),
             'https://github.com/google/bundletool/releases/download/1.18.1/bundletool-all-1.18.1.jar',
-            perEngine('aot-tools.dill'),
           ].map(Uri.parse).toList();
 
           expect(requests, equals(expected));

@@ -99,26 +99,21 @@ class SankofaCachedArtifacts implements SankofaArtifacts {
     );
   }
 
+  /// Resolves the bundled Sankofa `aot_tools` Dart entry point.
+  ///
+  /// Sankofa CodePush ships its own orchestrator (a drop-in replacement
+  /// for Shorebird's closed `aot-tools.dill`) at
+  /// `third_party/aot_tools/bin/aot_tools.dart` under the repo root.
+  /// The executable wrapper detects the `.dart` extension and invokes
+  /// it via `dart run`.
   File get _aotToolsFile {
-    const executableName = 'aot-tools';
-    final kernelFile = File(
-      p.join(
-        cache.getArtifactDirectory(executableName).path,
-        sankofaEnv.sankofaEngineRevision,
-        '$executableName.dill',
-      ),
-    );
-    if (kernelFile.existsSync()) {
-      return kernelFile;
-    }
-
-    // We shipped aot-tools as an executable in the past, so we return that if
-    // no kernel file is found.
     return File(
       p.join(
-        cache.getArtifactDirectory(executableName).path,
-        sankofaEnv.sankofaEngineRevision,
-        executableName,
+        sankofaEnv.sankofaRoot.path,
+        'third_party',
+        'aot_tools',
+        'bin',
+        'aot_tools.dart',
       ),
     );
   }
