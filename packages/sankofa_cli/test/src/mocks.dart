@@ -28,6 +28,7 @@ import 'package:sankofa_cli/src/engine_config.dart';
 import 'package:sankofa_cli/src/executables/devicectl/apple_device.dart';
 import 'package:sankofa_cli/src/executables/executables.dart';
 import 'package:sankofa_cli/src/logging/logging.dart';
+import 'package:sankofa_cli/src/native_config_editor.dart';
 import 'package:sankofa_cli/src/network_checker.dart';
 import 'package:sankofa_cli/src/os/os.dart';
 import 'package:sankofa_cli/src/patch_diff_checker.dart';
@@ -155,6 +156,8 @@ class MockProcess extends Mock implements Process {}
 class MockProgress extends Mock implements Progress {}
 
 class MockPubspec extends Mock implements Pubspec {}
+
+class MockNativeConfigEditor extends Mock implements NativeConfigEditor {}
 
 class MockPubspecEditor extends Mock implements PubspecEditor {}
 

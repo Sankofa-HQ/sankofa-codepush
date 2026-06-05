@@ -8,6 +8,7 @@ import 'package:sankofa_cli/src/config/config.dart';
 import 'package:sankofa_cli/src/doctor.dart';
 import 'package:sankofa_cli/src/executables/executables.dart';
 import 'package:sankofa_cli/src/logging/logging.dart';
+import 'package:sankofa_cli/src/native_config_editor.dart';
 import 'package:sankofa_cli/src/platform/platform.dart';
 import 'package:sankofa_cli/src/pubspec_editor.dart';
 import 'package:sankofa_cli/src/sankofa_command.dart';
@@ -311,7 +312,7 @@ Please make sure you are running "sankofa init" from within your Flutter project
       return ExitCode.software.code;
     }
 
-    _addSankofaYamlToProject(
+    final newSankofaYaml = _addSankofaYamlToProject(
       projectRoot: projectRoot,
       appId: appId,
       flavors: flavors,
@@ -321,6 +322,15 @@ Please make sure you are running "sankofa init" from within your Flutter project
       pubspecEditor.addSankofaYamlToPubspecAssets();
     }
 
+    // Phase 0.75 native config — write the Sankofa app_id directly into the
+    // host app's AndroidManifest meta-data and ios/Runner/Info.plist so the
+    // Sankofa Flutter engine can pick it up at startup without depending on
+    // the bundled YAML asset. Additive to the asset entry above (engine
+    // prefers native, falls back to asset), so existing tooling stays valid.
+    nativeConfigEditor
+      ..syncAndroidManifestMetadata(config: newSankofaYaml)
+      ..syncIosInfoPlist(config: newSankofaYaml);
+
     logger.info(
       '''
 
@@ -329,6 +339,7 @@ ${lightGreen.wrap('🐦 Sankofa initialized successfully!')}
 ✅ A sankofa app has been created.
 ✅ A "sankofa.yaml" has been created.
 ✅ The "pubspec.yaml" has been updated to include "sankofa.yaml" as an asset.
+✅ Native platform config wired into AndroidManifest.xml and ios/Runner/Info.plist.
 
 Reference the following commands to get started:
 

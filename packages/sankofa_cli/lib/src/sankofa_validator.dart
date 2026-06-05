@@ -1,13 +1,14 @@
 import 'package:collection/collection.dart';
 import 'package:mason_logger/mason_logger.dart';
-import 'package:scoped_deps/scoped_deps.dart';
 import 'package:sankofa_cli/src/auth/auth.dart';
 import 'package:sankofa_cli/src/logging/logging.dart';
+import 'package:sankofa_cli/src/native_config_editor.dart';
 import 'package:sankofa_cli/src/platform.dart';
 import 'package:sankofa_cli/src/pubspec_editor.dart';
 import 'package:sankofa_cli/src/sankofa_env.dart';
 import 'package:sankofa_cli/src/validators/validators.dart';
 import 'package:sankofa_code_push_client/sankofa_code_push_client.dart';
+import 'package:scoped_deps/scoped_deps.dart';
 
 /// An exception thrown when a precondition for running a command is not met.
 abstract interface class PreconditionFailedException implements Exception {
@@ -120,6 +121,31 @@ To fix, update your pubspec.yaml to include the following:
       // Ensure it's listed as a Flutter asset so it's bundled into the app.
       // Idempotent.
       pubspecEditor.ensureEngineConfigYamlAsset();
+
+      // Phase 0.75: keep platform-native config (AndroidManifest meta-data +
+      // ios/Runner/Info.plist) in sync with sankofa.yaml. The engine prefers
+      // native config and falls back to the bundled YAML asset, so this is
+      // additive — existing apps keep working, and once they rebuild against
+      // a Phase 0.75 engine the native path activates automatically.
+      // Idempotent on every release/patch.
+      final config = sankofaEnv.getSankofaYaml();
+      if (config != null) {
+        final androidUpdates = nativeConfigEditor.syncAndroidManifestMetadata(
+          config: config,
+        );
+        if (androidUpdates.isNotEmpty) {
+          logger.detail(
+            'Updated AndroidManifest.xml meta-data: '
+            '${androidUpdates.join(', ')}',
+          );
+        }
+        final iosUpdates = nativeConfigEditor.syncIosInfoPlist(config: config);
+        if (iosUpdates.isNotEmpty) {
+          logger.detail(
+            'Updated ios/Runner/Info.plist keys: ${iosUpdates.join(', ')}',
+          );
+        }
+      }
     }
 
     for (final validator in validators) {

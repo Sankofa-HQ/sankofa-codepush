@@ -6,19 +6,20 @@ import 'package:mocktail/mocktail.dart';
 import 'package:path/path.dart' as p;
 import 'package:platform/platform.dart';
 import 'package:pubspec_parse/pubspec_parse.dart';
-import 'package:scoped_deps/scoped_deps.dart';
 import 'package:sankofa_cli/src/code_push_client_wrapper.dart';
 import 'package:sankofa_cli/src/commands/init_command.dart';
 import 'package:sankofa_cli/src/config/config.dart';
 import 'package:sankofa_cli/src/doctor.dart';
 import 'package:sankofa_cli/src/executables/executables.dart';
 import 'package:sankofa_cli/src/logging/logging.dart';
+import 'package:sankofa_cli/src/native_config_editor.dart';
 import 'package:sankofa_cli/src/platform.dart';
 import 'package:sankofa_cli/src/platform/apple/apple.dart';
 import 'package:sankofa_cli/src/pubspec_editor.dart';
 import 'package:sankofa_cli/src/sankofa_env.dart';
 import 'package:sankofa_cli/src/sankofa_process.dart';
 import 'package:sankofa_cli/src/sankofa_validator.dart';
+import 'package:scoped_deps/scoped_deps.dart';
 import 'package:sankofa_code_push_client/sankofa_code_push_client.dart';
 import 'package:test/test.dart';
 
@@ -49,6 +50,7 @@ environment:
     late SankofaLogger logger;
     late Platform platform;
     late Progress progress;
+    late NativeConfigEditor nativeConfigEditor;
     late PubspecEditor pubspecEditor;
     late SankofaEnv sankofaEnv;
     late SankofaValidator sankofaValidator;
@@ -66,6 +68,7 @@ environment:
           loggerRef.overrideWith(() => logger),
           platformRef.overrideWith(() => platform),
           processRef.overrideWith(() => process),
+          nativeConfigEditorRef.overrideWith(() => nativeConfigEditor),
           pubspecEditorRef.overrideWith(() => pubspecEditor),
           sankofaEnvRef.overrideWith(() => sankofaEnv),
           sankofaValidatorRef.overrideWith(() => sankofaValidator),
@@ -76,6 +79,7 @@ environment:
     setUpAll(() {
       registerFallbackValue(ApplePlatform.ios);
       registerFallbackValue(MockDirectory());
+      registerFallbackValue(const SankofaYaml(appId: 'fallback_app_id'));
     });
 
     setUp(() {
@@ -88,6 +92,17 @@ environment:
       sankofaYamlFile = MockFile();
       pubspecYamlFile = MockFile();
       projectRoot = Directory.systemTemp.createTempSync();
+      nativeConfigEditor = MockNativeConfigEditor();
+      when(
+        () => nativeConfigEditor.syncAndroidManifestMetadata(
+          config: any(named: 'config'),
+        ),
+      ).thenReturn(const []);
+      when(
+        () => nativeConfigEditor.syncIosInfoPlist(
+          config: any(named: 'config'),
+        ),
+      ).thenReturn(const []);
       pubspecEditor = MockPubspecEditor();
       logger = MockSankofaLogger();
       platform = MockPlatform();

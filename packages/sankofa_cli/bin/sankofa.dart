@@ -18,6 +18,7 @@ import 'package:sankofa_cli/src/engine_config.dart';
 import 'package:sankofa_cli/src/executables/executables.dart';
 import 'package:sankofa_cli/src/http_client/http_client.dart';
 import 'package:sankofa_cli/src/logging/logging.dart';
+import 'package:sankofa_cli/src/native_config_editor.dart';
 import 'package:sankofa_cli/src/network_checker.dart';
 import 'package:sankofa_cli/src/os/os.dart';
 import 'package:sankofa_cli/src/patch_diff_checker.dart';
@@ -93,6 +94,7 @@ Command: sankofa ${args.join(' ')}
           platformRef,
           powershellRef,
           processRef,
+          nativeConfigEditorRef,
           pubspecEditorRef,
           sankofaAndroidArtifactsRef,
           sankofaArtifactsRef,
