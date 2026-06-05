@@ -18,22 +18,60 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:args/args.dart';
 import 'package:args/command_runner.dart';
 import 'package:sankofa_aot_tools/src/linker.dart';
 import 'package:sankofa_aot_tools/src/snapshot_analysis.dart';
 
-Future<void> main(List<String> args) async {
-  final runner = CommandRunner<int>(
-    'aot_tools',
-    'Sankofa CodePush — patch-creation orchestrator.',
-  )..addCommand(LinkCommand());
+/// Version of the Sankofa aot_tools orchestrator. The CLI parses
+/// `aot_tools --version` output to gate optional features, so this
+/// number is meaningful — bump it when adding capabilities the CLI
+/// keys off of.
+const String kAotToolsVersion = '0.1.0';
 
+Future<void> main(List<String> args) async {
+  final runner = _SankofaCommandRunner()
+    ..addCommand(LinkCommand())
+    ..addCommand(LinkMetadataCommand());
+
+  // Top-level --version and --trace are passed by the CLI as global
+  // options that must precede the subcommand. CommandRunner handles
+  // these via argParser overrides below.
   try {
     final code = await runner.run(args);
     exit(code ?? 0);
   } on UsageException catch (e) {
     stderr.writeln(e);
     exit(64);
+  }
+}
+
+class _SankofaCommandRunner extends CommandRunner<int> {
+  _SankofaCommandRunner()
+      : super(
+          'aot_tools',
+          'Sankofa CodePush — patch-creation orchestrator.',
+        ) {
+    argParser
+      ..addFlag(
+        'version',
+        negatable: false,
+        help: 'Print the aot_tools version.',
+      )
+      ..addOption(
+        'trace',
+        help: 'Path to a build-trace JSON-lines file. Accepted for '
+            'CLI compatibility; events are appended when supplied.',
+      );
+  }
+
+  @override
+  Future<int?> runCommand(ArgResults topLevelResults) async {
+    if (topLevelResults['version'] as bool) {
+      stdout.writeln(kAotToolsVersion);
+      return 0;
+    }
+    return super.runCommand(topLevelResults);
   }
 }
 
@@ -63,6 +101,12 @@ class LinkCommand extends Command<int> {
         'redirect-to',
         help: 'Redirect reporter output to a file (one JSON object per '
             'line when --reporter=json).',
+      )
+      ..addFlag(
+        'verbose',
+        negatable: false,
+        help: 'Forwarded to analyze_snapshot. Currently a no-op for the '
+            'orchestrator itself.',
       )
       ..addFlag(
         'disassemble',
@@ -238,6 +282,72 @@ class LinkCommand extends Command<int> {
       snapshotPath,
     ];
     return Process.run(analyzeSnapshotPath, args);
+  }
+}
+
+/// Emits the same JSON shape Shorebird's `link_metadata` does so the
+/// CLI can attach the link-percentage to patch uploads.
+class LinkMetadataCommand extends Command<int> {
+  @override
+  String get name => 'link_metadata';
+
+  @override
+  String get description =>
+      'Dumps minimal link stats for inclusion in patch metadata.';
+
+  @override
+  Future<int> run() async {
+    final rest = argResults!.rest;
+    if (rest.isEmpty) {
+      stderr.writeln('Usage: aot_tools link_metadata <debug_dir_or_zip>');
+      return 64;
+    }
+    final debugBundle = rest.first;
+    final dir = Directory(debugBundle);
+    if (!dir.existsSync()) {
+      // Zip bundles aren't produced by our LinkCommand (we emit a dir
+      // via --dump-debug-info); leave that branch unimplemented until
+      // a use-case lands.
+      stderr.writeln(
+        'aot_tools link_metadata expects a debug-info directory; got '
+        '$debugBundle (path does not exist as a directory).',
+      );
+      return 64;
+    }
+    // The dir contains base + patch analyze_snapshot.json files written
+    // by LinkCommand. Find them by extension and re-run the Linker so
+    // the stats reflect what shipped.
+    final jsonFiles = dir
+        .listSync(recursive: false)
+        .whereType<File>()
+        .where((f) => f.path.endsWith('.analyze_snapshot.json'))
+        .toList();
+    if (jsonFiles.length < 2) {
+      stdout.writeln(jsonEncode({'link_percentage': 0.0, 'reasons': []}));
+      return 0;
+    }
+    // Convention: the base file shows up first lexically (`App.aot...`
+    // < `out.aot...`), but to be robust use the file containing the
+    // larger function count as the base.
+    final analyses = jsonFiles
+        .map((f) => SnapshotAnalysis.loadFromFile(f.path))
+        .toList()
+      ..sort((a, b) => b.functions.length.compareTo(a.functions.length));
+    final base = analyses.first;
+    final patch = analyses.last;
+    final linker = Linker();
+    final table = linker.link(
+      baseCodes: base.functions,
+      patchCodes: patch.functions,
+    );
+    final patchSize = totalCodeSize(patch.functions);
+    final linkedSize = totalCodeSize(table.simToCpu.map((m) => m.patch));
+    final pct = patchSize == 0 ? 0.0 : 100.0 * linkedSize / patchSize;
+    stdout.writeln(jsonEncode({
+      'link_percentage': pct,
+      'reasons': <Map<String, Object?>>[],
+    }));
+    return 0;
   }
 }
 

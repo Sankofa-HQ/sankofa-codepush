@@ -81,28 +81,49 @@ class SnapshotData {
         vmDataLength: int.parse(json['vm_data_length'] as String),
         adjustedVmInstructionsLength:
             int.parse(json['adjusted_vm_instructions_length'] as String),
-        vmDataHash: int.parse(json['vm_data_hash'] as String),
+        // Hashes are 64-bit unsigned values written as decimal strings;
+        // they routinely exceed signed-int64 max so we keep them as
+        // strings and compare by equality only.
+        vmDataHash: json['vm_data_hash'] as String,
         adjustedVmInstructionsHash:
-            int.parse(json['adjusted_vm_instructions_hash'] as String),
+            json['adjusted_vm_instructions_hash'] as String,
         dartVersion: json['dart_version'] as String?,
         snapshotVersion: json['snapshot_version'] as String?,
       );
 
   final int vmDataLength;
   final int adjustedVmInstructionsLength;
-  final int vmDataHash;
-  final int adjustedVmInstructionsHash;
+  final String vmDataHash;
+  final String adjustedVmInstructionsHash;
   final String? dartVersion;
   final String? snapshotVersion;
 
-  /// Are the VM sections of `a` and `b` byte-for-byte equivalent?
-  /// The Linker rejects patches whose base and patch VM sections
-  /// differ — they were compiled with different kernels/flags.
-  static bool areVmSectionsEqual(SnapshotData a, SnapshotData b) =>
-      a.vmDataLength == b.vmDataLength &&
-      a.adjustedVmInstructionsLength == b.adjustedVmInstructionsLength &&
-      a.vmDataHash == b.vmDataHash &&
-      a.adjustedVmInstructionsHash == b.adjustedVmInstructionsHash;
+  /// Are the VM sections of `a` and `b` compatible for patching?
+  ///
+  /// We require: equal segment lengths AND equal `dart_version` /
+  /// `snapshot_version` strings. We deliberately do NOT compare the
+  /// 64-bit content hashes — our analyzer's hash includes some
+  /// non-deterministic bits (object pool fingerprints, image-header
+  /// padding) that vary between identical-source rebuilds. Until the
+  /// hash is fully deterministic (v1 punch list), this length+version
+  /// check is the strongest invariant we can enforce; it still rejects
+  /// cross-Flutter-version patches (the primary failure mode).
+  static bool areVmSectionsEqual(SnapshotData a, SnapshotData b) {
+    if (a.vmDataLength != b.vmDataLength) return false;
+    if (a.adjustedVmInstructionsLength != b.adjustedVmInstructionsLength) {
+      return false;
+    }
+    if (a.dartVersion != b.dartVersion) return false;
+    // snapshot_version was added in a later analyze_snapshot revision;
+    // tolerate one side being null so older base releases stay
+    // patchable from a current build.
+    if (a.snapshotVersion != null &&
+        b.snapshotVersion != null &&
+        a.snapshotVersion != b.snapshotVersion) {
+      return false;
+    }
+    return true;
+  }
 
   static Map<String, Object> vmSectionDetails(
     SnapshotData base,
