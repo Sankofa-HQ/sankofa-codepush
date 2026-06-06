@@ -580,17 +580,63 @@ impl PatchLifecycle {
         self.recompute_next_boot()
     }
 
+    /// Minimum runtime, in seconds, before a still-set
+    /// `currently_booting_patch` breadcrumb is interpreted as a real boot
+    /// crash. If the breadcrumb's `boot_started_at` was older than this,
+    /// we assume the previous process ran long enough that the patch is
+    /// healthy and the engine simply never called
+    /// `sankofa_report_launch_success` (most often because the user
+    /// swiped the app from Recents). In that case we clear the
+    /// breadcrumb without marking the patch Bad.
+    ///
+    /// The empirical floor for legitimate boot crashes is under a few
+    /// seconds (init, first plugin call, first frame). 10 seconds is the
+    /// shortest threshold that comfortably brackets that floor while not
+    /// punishing users who kill-and-relaunch quickly. The longer-term
+    /// fix is for the engine integration to call
+    /// `sankofa_report_launch_success` at first frame — see
+    /// `engine/src/flutter/shell/common/sankofa/codepush.cc`. Once that
+    /// lands the grace window becomes belt-and-suspenders.
+    pub const BOOT_CRASH_GRACE_SECS: u64 = 10;
+
     /// Called at init. If `currently_booting_patch` is still set from a
-    /// prior process, that boot crashed without recording success or
-    /// failure — transition the patch to `Bad{BootCrash}` and recompute
-    /// `next_boot_patch`. Returns the patch number that was recovered,
-    /// if any.
+    /// prior process, that boot _may have_ crashed without recording
+    /// success or failure. We use `boot_started_at` to decide:
+    /// - If the breadcrumb is younger than [`BOOT_CRASH_GRACE_SECS`],
+    ///   treat as a real boot crash → transition to `Bad{BootCrash}` and
+    ///   recompute `next_boot_patch`. Returns `Some(n)`.
+    /// - Otherwise, the previous process ran long enough that the patch
+    ///   is almost certainly fine — clear the stale breadcrumb without
+    ///   marking the patch Bad. Returns `None` so the patch stays
+    ///   `Installed` and bootable on this launch.
     pub fn detect_boot_crash_on_init(&mut self) -> Result<Option<usize>> {
         let Some(n) = self.pointers.currently_booting_patch else {
             return Ok(None);
         };
-        self.record_boot_failure(n)?;
-        Ok(Some(n))
+        let now = crate::time::unix_timestamp();
+        let started = self.pointers.boot_started_at.unwrap_or(now);
+        // Saturating sub keeps us safe if the system clock moved backward
+        // between `record_boot_start` and now (NTP correction, manual
+        // adjustment, etc.). In that case we err on the side of caution
+        // and treat the breadcrumb as fresh — better to mark a probably-
+        // healthy patch Bad once than to silently keep a real crasher.
+        let elapsed = now.saturating_sub(started);
+        if elapsed < Self::BOOT_CRASH_GRACE_SECS {
+            self.record_boot_failure(n)?;
+            return Ok(Some(n));
+        }
+        sankofa_info!(
+            "Stale boot breadcrumb for patch {} ({}s elapsed >= {}s grace). \
+             Assuming prior boot succeeded and engine forgot to call \
+             sankofa_report_launch_success. Clearing without marking Bad.",
+            n,
+            elapsed,
+            Self::BOOT_CRASH_GRACE_SECS
+        );
+        self.pointers.currently_booting_patch = None;
+        self.pointers.boot_started_at = None;
+        self.save_pointers()?;
+        Ok(None)
     }
 
     /// Validates that `next_boot_patch` is bootable (its on-disk size
@@ -1755,7 +1801,15 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn detect_boot_crash_on_init_recovers_when_breadcrumb_set() {
+        use mock_instant::global::MockClock;
+        use std::time::Duration;
+        // Hold the clock so this test's elapsed-since-record_boot_start
+        // is 0 (well inside the grace window) regardless of how other
+        // tests left the global MockClock.
+        MockClock::set_system_time(Duration::from_secs(500));
+
         let tmp = TempDir::new().unwrap();
         // First "process": records boot start, then "crashes" without
         // recording success or failure.
@@ -1782,6 +1836,110 @@ mod tests {
     fn detect_boot_crash_on_init_is_noop_when_no_breadcrumb() {
         let (_tmp, mut lifecycle) = fixture();
         assert_eq!(lifecycle.detect_boot_crash_on_init().unwrap(), None);
+    }
+
+    /// Stale breadcrumb (older than `BOOT_CRASH_GRACE_SECS`) is treated as
+    /// a user-killed app, not a boot crash. The patch stays Installed.
+    /// This is the common case on Android when the user swipes the app
+    /// from Recents before `sankofa_report_launch_success` runs (or,
+    /// today, on every cold launch because the engine never calls
+    /// `sankofa_report_launch_success`).
+    #[test]
+    #[serial_test::serial]
+    fn detect_boot_crash_on_init_clears_stale_breadcrumb_without_marking_bad() {
+        use mock_instant::global::MockClock;
+        use std::time::Duration;
+        MockClock::set_system_time(Duration::from_secs(1_000));
+
+        let tmp = TempDir::new().unwrap();
+        {
+            let mut lifecycle = reload_at(tmp.path());
+            install_state(&lifecycle, 1, 100);
+            lifecycle.pointers.next_boot_patch = Some(1);
+            lifecycle.save_pointers().unwrap();
+            lifecycle.record_boot_start(1).unwrap();
+        }
+        // Advance well past the grace window before the next "process" inits.
+        MockClock::set_system_time(Duration::from_secs(
+            1_000 + PatchLifecycle::BOOT_CRASH_GRACE_SECS + 5,
+        ));
+
+        let mut lifecycle = reload_at(tmp.path());
+        let recovered = lifecycle.detect_boot_crash_on_init().unwrap();
+        assert_eq!(recovered, None, "stale breadcrumb should NOT mark bad");
+        assert!(
+            matches!(
+                lifecycle.read_state(1),
+                Some(PatchState::Installed { .. })
+            ),
+            "patch should stay Installed after stale breadcrumb cleanup"
+        );
+        assert!(lifecycle.pointers().currently_booting_patch.is_none());
+        assert!(lifecycle.pointers().boot_started_at.is_none());
+    }
+
+    /// A fresh breadcrumb (within the grace window) is treated as a
+    /// real boot crash — the patch is tombstoned `Bad{BootCrash}`.
+    #[test]
+    #[serial_test::serial]
+    fn detect_boot_crash_on_init_marks_bad_inside_grace_window() {
+        use mock_instant::global::MockClock;
+        use std::time::Duration;
+        MockClock::set_system_time(Duration::from_secs(2_000));
+
+        let tmp = TempDir::new().unwrap();
+        {
+            let mut lifecycle = reload_at(tmp.path());
+            install_state(&lifecycle, 1, 100);
+            lifecycle.pointers.next_boot_patch = Some(1);
+            lifecycle.save_pointers().unwrap();
+            lifecycle.record_boot_start(1).unwrap();
+        }
+        // Advance just inside the grace window (crashed immediately).
+        MockClock::set_system_time(Duration::from_secs(
+            2_000 + PatchLifecycle::BOOT_CRASH_GRACE_SECS.saturating_sub(1),
+        ));
+
+        let mut lifecycle = reload_at(tmp.path());
+        let recovered = lifecycle.detect_boot_crash_on_init().unwrap();
+        assert_eq!(recovered, Some(1));
+        assert!(matches!(
+            lifecycle.read_state(1),
+            Some(PatchState::Bad { .. })
+        ));
+        assert!(lifecycle.pointers().currently_booting_patch.is_none());
+    }
+
+    /// Clock skew (system time moved backward between record_boot_start
+    /// and detect_boot_crash_on_init) must NOT silently mask a real
+    /// crash. `saturating_sub` makes the elapsed time read as 0, which
+    /// is inside any positive grace window, so we mark Bad to err on the
+    /// side of caution.
+    #[test]
+    #[serial_test::serial]
+    fn detect_boot_crash_on_init_marks_bad_when_clock_moves_backward() {
+        use mock_instant::global::MockClock;
+        use std::time::Duration;
+        MockClock::set_system_time(Duration::from_secs(10_000));
+
+        let tmp = TempDir::new().unwrap();
+        {
+            let mut lifecycle = reload_at(tmp.path());
+            install_state(&lifecycle, 1, 100);
+            lifecycle.pointers.next_boot_patch = Some(1);
+            lifecycle.save_pointers().unwrap();
+            lifecycle.record_boot_start(1).unwrap();
+        }
+        // Clock corrected backwards (e.g., NTP).
+        MockClock::set_system_time(Duration::from_secs(5_000));
+
+        let mut lifecycle = reload_at(tmp.path());
+        let recovered = lifecycle.detect_boot_crash_on_init().unwrap();
+        assert_eq!(recovered, Some(1));
+        assert!(matches!(
+            lifecycle.read_state(1),
+            Some(PatchState::Bad { .. })
+        ));
     }
 
     #[test]
