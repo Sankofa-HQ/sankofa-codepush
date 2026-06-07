@@ -1,0 +1,179 @@
+Loaded 468 libraries.
+=== Library: package:aot_tools/src/snapshot_analysis.dart ===
+library;
+import self as self;
+import "dart:core" as core;
+import "package:meta/meta.dart" as meta;
+import "package:collection/src/functions.dart" as fun;
+
+import "package:collection/collection.dart";
+import "package:meta/meta.dart";
+
+typedef Json = core::Map<core::String, dynamic>;
+class SnapshotData extends core::Object {
+  final field core::int vmDataLength;
+  final field core::int vmInstructionsLength;
+  final field core::int vmDataHash;
+  final field core::int vmInstructionsHash;
+  final field core::String? dartVersion;
+  final field core::String? snapshotVersion;
+  constructor •({required core::int vmDataLength, required core::int vmInstructionsLength, required core::int vmDataHash, required core::int vmInstructionsHash, core::String? dartVersion = #C1, core::String? snapshotVersion = #C1}) → self::SnapshotData
+    : self::SnapshotData::vmDataLength = vmDataLength, self::SnapshotData::vmInstructionsLength = vmInstructionsLength, self::SnapshotData::vmDataHash = vmDataHash, self::SnapshotData::vmInstructionsHash = vmInstructionsHash, self::SnapshotData::dartVersion = dartVersion, self::SnapshotData::snapshotVersion = snapshotVersion, super core::Object::•()
+    ;
+  static factory fromJson(core::Map<core::String, dynamic> json) → self::SnapshotData {
+    return new self::SnapshotData::•(vmDataLength: core::int::parse(json.{core::Map::[]}("vm_data_length"){(core::Object?) → dynamic} as core::String), vmInstructionsLength: core::int::parse(json.{core::Map::[]}("adjusted_vm_instructions_length"){(core::Object?) → dynamic} as core::String), vmDataHash: core::int::parse(json.{core::Map::[]}("vm_data_hash"){(core::Object?) → dynamic} as core::String), vmInstructionsHash: core::int::parse(json.{core::Map::[]}("adjusted_vm_instructions_hash"){(core::Object?) → dynamic} as core::String), dartVersion: json.{core::Map::[]}("dart_version"){(core::Object?) → dynamic} as core::String?, snapshotVersion: json.{core::Map::[]}("snapshot_version"){(core::Object?) → dynamic} as core::String?);
+  }
+  @#C2
+  method toJson() → core::Map<core::String, dynamic> {
+    return block {
+      final core::Map<core::String, dynamic> #t1 = <core::String, dynamic>{};
+      #t1.{core::Map::[]=}{Invariant}("vm_data_length", this.{self::SnapshotData::vmDataLength}{core::int}.{core::int::toString}(){() → core::String}){(core::String, dynamic) → void};
+      #t1.{core::Map::[]=}{Invariant}("adjusted_vm_instructions_length", this.{self::SnapshotData::vmInstructionsLength}{core::int}.{core::int::toString}(){() → core::String}){(core::String, dynamic) → void};
+      #t1.{core::Map::[]=}{Invariant}("vm_data_hash", this.{self::SnapshotData::vmDataHash}{core::int}.{core::int::toString}(){() → core::String}){(core::String, dynamic) → void};
+      #t1.{core::Map::[]=}{Invariant}("adjusted_vm_instructions_hash", this.{self::SnapshotData::vmInstructionsHash}{core::int}.{core::int::toString}(){() → core::String}){(core::String, dynamic) → void};
+      if(!(this.{self::SnapshotData::dartVersion}{core::String?} == null))
+        #t1.{core::Map::[]=}{Invariant}("dart_version", this.{self::SnapshotData::dartVersion}{core::String?}){(core::String, dynamic) → void};
+      if(!(this.{self::SnapshotData::snapshotVersion}{core::String?} == null))
+        #t1.{core::Map::[]=}{Invariant}("snapshot_version", this.{self::SnapshotData::snapshotVersion}{core::String?}){(core::String, dynamic) → void};
+    } =>#t1;
+  }
+  static method areVmSectionsEqual(self::SnapshotData a, self::SnapshotData b) → core::bool {
+    return a.{self::SnapshotData::vmDataLength}{core::int} =={core::num::==}{(core::Object) → core::bool} b.{self::SnapshotData::vmDataLength}{core::int} && a.{self::SnapshotData::vmInstructionsLength}{core::int} =={core::num::==}{(core::Object) → core::bool} b.{self::SnapshotData::vmInstructionsLength}{core::int} && a.{self::SnapshotData::vmDataHash}{core::int} =={core::num::==}{(core::Object) → core::bool} b.{self::SnapshotData::vmDataHash}{core::int} && a.{self::SnapshotData::vmInstructionsHash}{core::int} =={core::num::==}{(core::Object) → core::bool} b.{self::SnapshotData::vmInstructionsHash}{core::int};
+  }
+  static method vmSectionDetails(self::SnapshotData base, self::SnapshotData patch) → core::Map<core::String, core::Object> {
+    final core::String? dartVersion = patch.{self::SnapshotData::dartVersion}{core::String?};
+    final core::String? snapshotVersion = patch.{self::SnapshotData::snapshotVersion}{core::String?};
+    return block {
+      final core::Map<core::String, core::Object> #t2 = <core::String, core::Object>{};
+      if(!(dartVersion == null))
+        #t2.{core::Map::[]=}{Invariant}("dart_version", dartVersion{core::String}){(core::String, core::Object) → void};
+      if(!(snapshotVersion == null))
+        #t2.{core::Map::[]=}{Invariant}("snapshot_version", snapshotVersion{core::String}){(core::String, core::Object) → void};
+      #t2.{core::Map::[]=}{Invariant}("vm_data_length", <core::String, core::int>{"base": base.{self::SnapshotData::vmDataLength}{core::int}, "patch": patch.{self::SnapshotData::vmDataLength}{core::int}}){(core::String, core::Object) → void};
+      #t2.{core::Map::[]=}{Invariant}("vm_instructions_length", <core::String, core::int>{"base": base.{self::SnapshotData::vmInstructionsLength}{core::int}, "patch": patch.{self::SnapshotData::vmInstructionsLength}{core::int}}){(core::String, core::Object) → void};
+      #t2.{core::Map::[]=}{Invariant}("vm_data_hash", <core::String, core::int>{"base": base.{self::SnapshotData::vmDataHash}{core::int}, "patch": patch.{self::SnapshotData::vmDataHash}{core::int}}){(core::String, core::Object) → void};
+      #t2.{core::Map::[]=}{Invariant}("vm_instructions_hash", <core::String, core::int>{"base": base.{self::SnapshotData::vmInstructionsHash}{core::int}, "patch": patch.{self::SnapshotData::vmInstructionsHash}{core::int}}){(core::String, core::Object) → void};
+    } =>#t2;
+  }
+}
+@#C4
+class Hash extends core::Object /*hasConstConstructor*/  {
+  final field core::String long;
+  const constructor •(core::String long) → self::Hash
+    : self::Hash::long = long, super core::Object::•()
+    ;
+  static factory fromJson(core::String json) → self::Hash
+    return new self::Hash::•(json);
+  method toJson() → core::String
+    return this.{self::Hash::long}{core::String};
+  get short() → core::String
+    return this.{self::Hash::long}{core::String}.{core::String::substring}(0, 8){(core::int, [core::int?]) → core::String};
+  @#C5
+  method toString() → core::String
+    return this.{self::Hash::long}{core::String};
+  @#C5
+  get hashCode() → core::int
+    return this.{self::Hash::long}{core::String}.{core::String::hashCode}{core::int};
+  @#C5
+  operator ==(core::Object other) → core::bool
+    return other is self::Hash && this.{self::Hash::long}{core::String} =={core::String::==}{(core::Object) → core::bool} other{self::Hash}.{self::Hash::long}{core::String};
+}
+class Code extends core::Object /*hasConstConstructor*/  {
+  final field core::String name;
+  final field core::int offset;
+  final field self::Hash subgraphHash;
+  final field self::Hash selfHash;
+  final field self::Hash opSubgraphHash;
+  final field core::int size;
+  final field core::int indexInEntries;
+  final field core::List<core::int> selfPpIndices;
+  final field core::List<core::int> subgraphPpIndices;
+  final field core::List<core::int>? subgraphSelectorOffsets;
+  final field core::List<core::int>? selfSelectorOffsets;
+  final field core::List<core::int>? selfFieldTableOffsets;
+  final field core::List<core::int>? subgraphFieldTableOffsets;
+  final field core::List<core::String>? disassembly;
+  const constructor •({required core::String name, required core::int indexInEntries, required core::int offset, required core::int size, required self::Hash subgraphHash, required self::Hash opSubgraphHash, required self::Hash selfHash, required core::List<core::int> subgraphPpIndices, required core::List<core::int> selfPpIndices, required core::List<core::int>? subgraphSelectorOffsets, required core::List<core::int>? selfSelectorOffsets, core::List<core::int>? selfFieldTableOffsets = #C1, core::List<core::int>? subgraphFieldTableOffsets = #C1, core::List<core::String>? disassembly = #C1}) → self::Code
+    : self::Code::name = name, self::Code::indexInEntries = indexInEntries, self::Code::offset = offset, self::Code::size = size, self::Code::subgraphHash = subgraphHash, self::Code::opSubgraphHash = opSubgraphHash, self::Code::selfHash = selfHash, self::Code::subgraphPpIndices = subgraphPpIndices, self::Code::selfPpIndices = selfPpIndices, self::Code::subgraphSelectorOffsets = subgraphSelectorOffsets, self::Code::selfSelectorOffsets = selfSelectorOffsets, self::Code::selfFieldTableOffsets = selfFieldTableOffsets, self::Code::subgraphFieldTableOffsets = subgraphFieldTableOffsets, self::Code::disassembly = disassembly, super core::Object::•()
+    ;
+  static factory fromJson(core::Map<core::String, dynamic> json) → self::Code {
+    return new self::Code::•(name: json.{core::Map::[]}("name"){(core::Object?) → dynamic} as core::String, indexInEntries: json.{core::Map::[]}("index_in_entries"){(core::Object?) → dynamic} as core::int, offset: json.{core::Map::[]}("offset"){(core::Object?) → dynamic} as core::int, size: json.{core::Map::[]}("size"){(core::Object?) → dynamic} as core::int, subgraphHash: self::Hash::fromJson(json.{core::Map::[]}("subgraph_hash"){(core::Object?) → dynamic} as core::String), opSubgraphHash: self::Hash::fromJson(json.{core::Map::[]}("op_subgraph_hash"){(core::Object?) → dynamic} as core::String), selfHash: self::Hash::fromJson(json.{core::Map::[]}("self_hash"){(core::Object?) → dynamic} as core::String), subgraphPpIndices: (json.{core::Map::[]}("subgraph_pp"){(core::Object?) → dynamic} as core::List<dynamic>).{core::List::cast}<core::int>(){() → core::List<core::int>}, selfPpIndices: (json.{core::Map::[]}("self_pp"){(core::Object?) → dynamic} as core::List<dynamic>).{core::List::cast}<core::int>(){() → core::List<core::int>}, subgraphSelectorOffsets: let final core::List<dynamic>? #t3 = json.{core::Map::[]}("subgraph_selectors"){(core::Object?) → dynamic} as core::List<dynamic>? in #t3 == null ?{core::List<core::int>?} null : #t3{core::List<dynamic>}.{core::List::cast}<core::int>(){() → core::List<core::int>}, selfSelectorOffsets: let final core::List<dynamic>? #t4 = json.{core::Map::[]}("self_selectors"){(core::Object?) → dynamic} as core::List<dynamic>? in #t4 == null ?{core::List<core::int>?} null : #t4{core::List<dynamic>}.{core::List::cast}<core::int>(){() → core::List<core::int>}, disassembly: let final core::List<dynamic>? #t5 = json.{core::Map::[]}("disassembly"){(core::Object?) → dynamic} as core::List<dynamic>? in #t5 == null ?{core::List<core::String>?} null : #t5{core::List<dynamic>}.{core::List::cast}<core::String>(){() → core::List<core::String>}, selfFieldTableOffsets: let final core::List<dynamic>? #t6 = json.{core::Map::[]}("self_field_table"){(core::Object?) → dynamic} as core::List<dynamic>? in #t6 == null ?{core::List<core::int>?} null : #t6{core::List<dynamic>}.{core::List::cast}<core::int>(){() → core::List<core::int>}, subgraphFieldTableOffsets: let final core::List<dynamic>? #t7 = json.{core::Map::[]}("subgraph_field_table"){(core::Object?) → dynamic} as core::List<dynamic>? in #t7 == null ?{core::List<core::int>?} null : #t7{core::List<dynamic>}.{core::List::cast}<core::int>(){() → core::List<core::int>});
+  }
+  method containsOffset(core::int offset) → core::bool {
+    return this.{self::Code::offset}{core::int}.{core::num::<=}(offset){(core::num) → core::bool} && offset.{core::num::<}(this.{self::Code::offset}{core::int}.{core::num::+}(this.{self::Code::size}{core::int}){(core::num) → core::int}){(core::num) → core::bool};
+  }
+  get endOffset() → core::int
+    return this.{self::Code::offset}{core::int}.{core::num::+}(this.{self::Code::size}{core::int}){(core::num) → core::int};
+  method toJson() → core::Map<core::String, dynamic> {
+    return block {
+      final core::Map<core::String, dynamic> #t8 = <core::String, dynamic>{};
+      #t8.{core::Map::[]=}{Invariant}("name", this.{self::Code::name}{core::String}){(core::String, dynamic) → void};
+      #t8.{core::Map::[]=}{Invariant}("index_in_entries", this.{self::Code::indexInEntries}{core::int}){(core::String, dynamic) → void};
+      #t8.{core::Map::[]=}{Invariant}("offset", this.{self::Code::offset}{core::int}){(core::String, dynamic) → void};
+      #t8.{core::Map::[]=}{Invariant}("size", this.{self::Code::size}{core::int}){(core::String, dynamic) → void};
+      #t8.{core::Map::[]=}{Invariant}("subgraph_hash", this.{self::Code::subgraphHash}{self::Hash}.{self::Hash::toJson}(){() → core::String}){(core::String, dynamic) → void};
+      #t8.{core::Map::[]=}{Invariant}("op_subgraph_hash", this.{self::Code::opSubgraphHash}{self::Hash}.{self::Hash::toJson}(){() → core::String}){(core::String, dynamic) → void};
+      #t8.{core::Map::[]=}{Invariant}("self_hash", this.{self::Code::selfHash}{self::Hash}.{self::Hash::toJson}(){() → core::String}){(core::String, dynamic) → void};
+      #t8.{core::Map::[]=}{Invariant}("subgraph_pp", this.{self::Code::subgraphPpIndices}{core::List<core::int>}){(core::String, dynamic) → void};
+      #t8.{core::Map::[]=}{Invariant}("self_pp", this.{self::Code::selfPpIndices}{core::List<core::int>}){(core::String, dynamic) → void};
+      #t8.{core::Map::[]=}{Invariant}("subgraph_selectors", this.{self::Code::subgraphSelectorOffsets}{core::List<core::int>?}){(core::String, dynamic) → void};
+      #t8.{core::Map::[]=}{Invariant}("self_selectors", this.{self::Code::selfSelectorOffsets}{core::List<core::int>?}){(core::String, dynamic) → void};
+      if(!(this.{self::Code::disassembly}{core::List<core::String>?} == null))
+        #t8.{core::Map::[]=}{Invariant}("disassembly", this.{self::Code::disassembly}{core::List<core::String>?}){(core::String, dynamic) → void};
+      #t8.{core::Map::[]=}{Invariant}("self_field_table", this.{self::Code::selfFieldTableOffsets}{core::List<core::int>?}){(core::String, dynamic) → void};
+      #t8.{core::Map::[]=}{Invariant}("subgraph_field_table", this.{self::Code::subgraphFieldTableOffsets}{core::List<core::int>?}){(core::String, dynamic) → void};
+    } =>#t8;
+  }
+  get nameAndHash() → core::String
+    return "${this.{self::Code::name}{core::String}} (${this.{self::Code::subgraphHash}{self::Hash}.{self::Hash::short}{core::String}})";
+  @#C5
+  method toString() → core::String {
+    return "Code(name: ${this.{self::Code::name}{core::String}}, offset: ${this.{self::Code::offset}{core::int}}, hash: ${this.{self::Code::subgraphHash}{self::Hash}}, size: ${this.{self::Code::size}{core::int}})";
+  }
+}
+class SnapshotAnalysis extends core::Object {
+  final field self::SnapshotData snapshotData;
+  final field core::List<self::Code> functions;
+  late final field core::Map<self::Hash, core::List<self::Code>> hashesToCodes = fun::groupBy<self::Code, self::Hash>(this.{self::SnapshotAnalysis::functions}{core::List<self::Code>}, (self::Code c) → self::Hash => c.{self::Code::subgraphHash}{self::Hash});
+  constructor •({required self::SnapshotData snapshotData, required core::List<self::Code> functions}) → self::SnapshotAnalysis
+    : self::SnapshotAnalysis::snapshotData = snapshotData, self::SnapshotAnalysis::functions = functions, super core::Object::•() {
+    for (core::int i = 0; i.{core::num::<}(this.{self::SnapshotAnalysis::functions}{core::List<self::Code>}.{core::List::length}{core::int}.{core::num::-}(1){(core::num) → core::int}){(core::num) → core::bool}; i = i.{core::num::+}(1){(core::num) → core::int}) {
+      final core::bool inOrder = this.{self::SnapshotAnalysis::functions}{core::List<self::Code>}.{core::List::[]}(i){(core::int) → self::Code}.{self::Code::offset}{core::int}.{core::num::<}(this.{self::SnapshotAnalysis::functions}{core::List<self::Code>}.{core::List::[]}(i.{core::num::+}(1){(core::num) → core::int}){(core::int) → self::Code}.{self::Code::offset}{core::int}){(core::num) → core::bool};
+      if(!inOrder) {
+        throw new core::StateError::•("Functions are not in code offsets order");
+      }
+    }
+  }
+  static factory fromJson(core::Map<core::String, dynamic> json) → self::SnapshotAnalysis {
+    return new self::SnapshotAnalysis::•(snapshotData: self::SnapshotData::fromJson(json.{core::Map::[]}("snapshot_data"){(core::Object?) → dynamic} as core::Map<core::String, dynamic>), functions: (json.{core::Map::[]}("functions"){(core::Object?) → dynamic} as core::List<dynamic>).{core::Iterable::map}<self::Code>((dynamic f) → self::Code => self::Code::fromJson(f as core::Map<core::String, dynamic>)){((dynamic) → self::Code) → core::Iterable<self::Code>}.{core::Iterable::toList}(){({growable: core::bool}) → core::List<self::Code>});
+  }
+  @#C2
+  method toJson() → core::Map<core::String, dynamic> {
+    return <core::String, dynamic>{"snapshot_data": this.{self::SnapshotAnalysis::snapshotData}{self::SnapshotData}.{self::SnapshotData::toJson}(){() → core::Map<core::String, dynamic>}, "functions": this.{self::SnapshotAnalysis::functions}{core::List<self::Code>}.{core::Iterable::map}<core::Map<core::String, dynamic>>((self::Code f) → core::Map<core::String, dynamic> => f.{self::Code::toJson}(){() → core::Map<core::String, dynamic>}){((self::Code) → core::Map<core::String, dynamic>) → core::Iterable<core::Map<core::String, dynamic>>}.{core::Iterable::toList}(){({growable: core::bool}) → core::List<core::Map<core::String, dynamic>>}};
+  }
+  get codesWithHashCollision() → core::Iterable<self::Code>
+    return this.{self::SnapshotAnalysis::hashesToCodes}{core::Map<self::Hash, core::List<self::Code>>}.{core::Map::values}{core::Iterable<core::List<self::Code>>}.{core::Iterable::where}((core::List<self::Code> c) → core::bool => c.{core::List::length}{core::int}.{core::num::>}(1){(core::num) → core::bool}){((core::List<self::Code>) → core::bool) → core::Iterable<core::List<self::Code>>}.{core::Iterable::expand}<self::Code>((core::List<self::Code> c) → core::List<self::Code> => c){((core::List<self::Code>) → core::Iterable<self::Code>) → core::Iterable<self::Code>};
+  method codeContainingOffset(core::int offset) → self::Code? {
+    if(offset.{core::num::<}(this.{self::SnapshotAnalysis::functions}{core::List<self::Code>}.{core::Iterable::first}{self::Code}.{self::Code::offset}{core::int}){(core::num) → core::bool} || offset.{core::num::>}(this.{self::SnapshotAnalysis::functions}{core::List<self::Code>}.{core::Iterable::last}{self::Code}.{self::Code::endOffset}{core::int}){(core::num) → core::bool}) {
+      return null;
+    }
+    core::int low = 0;
+    core::int high = this.{self::SnapshotAnalysis::functions}{core::List<self::Code>}.{core::List::length}{core::int}.{core::num::-}(1){(core::num) → core::int};
+    while (low.{core::num::<=}(high){(core::num) → core::bool}) {
+      final core::int mid = low.{core::num::+}(high.{core::num::-}(low){(core::num) → core::int}.{core::num::~/}(2){(core::num) → core::int}){(core::num) → core::int};
+      final self::Code code = this.{self::SnapshotAnalysis::functions}{core::List<self::Code>}.{core::List::[]}(mid){(core::int) → self::Code};
+      if(code.{self::Code::containsOffset}(offset){(core::int) → core::bool}) {
+        return code;
+      }
+      else
+        if(code.{self::Code::offset}{core::int}.{core::num::<}(offset){(core::num) → core::bool}) {
+          low = mid.{core::num::+}(1){(core::num) → core::int};
+        }
+        else {
+          high = mid.{core::num::-}(1){(core::num) → core::int};
+        }
+    }
+    return null;
+  }
+}
+
