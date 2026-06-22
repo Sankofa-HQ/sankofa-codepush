@@ -51,3 +51,25 @@ This is exactly what `project_beta3_landed` / `project_codepush_beta3_cross_plat
 - Field/pool/dispatch alignment correctness (task 4) — most LOC.
 - `Dart_CreateIsolateGroupWithBaseSnapshot` body in the VM (task 7) — the fusion.
 The execution model (interpreter) is NOT an unknown — β.3 proved it on device.
+
+## Progress (2026-06-22) — local build loop + analyzer-side done
+
+The whole port is now built + validated **locally** (no rented servers): graft
+the fork's codepush commits onto the engine's Dart 3.12.1 tree
+(`engine/src/flutter/third_party/dart`) via `git diff <base>..<tip> | git apply
+--3way`, then `ninja -C out/mac_release_arm64 analyze_snapshot gen_snapshot`.
+Functional tests run by compiling a macOS AOT from any `app.dill`
+(`gen_snapshot --snapshot_kind=app-aot-elf`) and analyzing it.
+
+- ✅ **Task 1** (transitive `subgraph_pp`) — committed `1636818a04b`; validated on 9,155 fns.
+- ✅ **Task 2** (base-build link-info emitters) — already wired in Phase B-1.
+- ✅ **Task 3 PRODUCER** (`compute_dd_table`) — committed `eeefd9457d1`; the fan-in
+  cascade limiter, keyed by `subgraph_hash`, formats `SDDT`/`SDCL`. Validated:
+  1250 slots selected, top fan-in 5,688, on a real macOS AOT.
+
+**Refined order for the rest** (the hard, coupled half): `compute_dd_slot_mapping`
+must bridge `subgraph_hash` ↔ gen_snapshot's `dd_function_identity`, so it's part
+of **Task 4** (the gen_snapshot consumer: `FinalizeIndirectStaticCallTable` +
+field/pool/dispatch IL alignment in `precompiler.cc`). Then Task 6/7 (the 12
+engine patches + `Dart_CreateIsolateGroupWithBaseSnapshot`) → iOS-config build →
+on-device round-trip. The analyzer side is done; the precompiler/engine side is next.
