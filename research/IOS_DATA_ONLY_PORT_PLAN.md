@@ -73,3 +73,46 @@ of **Task 4** (the gen_snapshot consumer: `FinalizeIndirectStaticCallTable` +
 field/pool/dispatch IL alignment in `precompiler.cc`). Then Task 6/7 (the 12
 engine patches + `Dart_CreateIsolateGroupWithBaseSnapshot`) → iOS-config build →
 on-device round-trip. The analyzer side is done; the precompiler/engine side is next.
+
+## Progress (2026-06-23) — measured the link-% ceiling; bottleneck re-located
+
+Ran the core data-only metric end-to-end on the live local build
+(`research/measure_link_percentage.sh`, reproducible): build base + patch
+AOTs, `analyze_snapshot --shorebird` both, group by `subgraph_hash`
+(Linker.link §4), report reuse %.
+
+**Grounded measurements (1379-fn macOS AOT, `mac_release_arm64`):**
+- `--shorebird` is solid: **1379 functions, 100% distinct `subgraph_hash`**,
+  `self_hash` **100% identical** across independent builds (per-function IL is
+  fully deterministic). Task 1 confirmed good.
+- Task 2 base-build emitters are **real**: `gen_snapshot
+  --print_{class,field,dispatch}_table_link_info_to` produce `base.ct.link`
+  (~42 KB), `base.ft.link` (~2 KB), `base.dt.link`.
+- **Link ceiling without alignment = ~50%.** Recompiling *identical source*
+  (zero code change) matches only **883/1382 fns (63.9%) / 49.5% by size**.
+  **499 functions have identical `self_hash` but a different `subgraph_hash`** —
+  pure object-pool/class/field **layout** divergence between independent
+  compiles, not IL change.
+- **The patch-build alignment consumer is a NO-OP.** Feeding the base link
+  data back in (`gen_snapshot --base_ct_link_data --base_ft_link_data
+  --base_dt_link_data`) is *accepted* but changes nothing: still 63.9% / 49.5%.
+  The flag surface exists (Phase B-1) but the precompiler doesn't actually
+  reuse the base offsets.
+
+**Re-prioritization (the important conclusion):** the dominant link-% lever is
+the **patch-build offset-alignment consumer** in `precompiler.cc` /
+`object_pool.cc` / `class_table.cc` — making the patch build reuse the base's
+pool/class/field/dispatch offsets so `subgraph_hash` matches. Until that works,
+link% is capped ~50% on *any* patch and **DD cannot help** (DD breaks the
+transitive cascade for high-fan-in functions, but here even zero-change
+functions mismatch on layout). So **Task 4c (alignment) outranks
+`compute_dd_slot_mapping` + the whole DD pipeline.** Do alignment first; measure
+again with the harness (expect a jump toward ~100% on identical source); then DD
+for the residual transitive cascade.
+
+**Secondary gaps found:** `subgraph_selectors` + `subgraph_field_table` are not
+emitted by `--shorebird` yet (0 across all fns) — needed to *verify* dispatch/
+field alignment. And confirm `subgraph_hash` is computed over callee
+*identities*, not build-volatile *offsets* (the 0%-diverged `subgraph_pp` vs
+499 diverged `subgraph_hash` suggests the hash folds in something layout-
+sensitive — worth auditing as it may inflate the mismatch).
