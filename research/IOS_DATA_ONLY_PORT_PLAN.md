@@ -150,3 +150,52 @@ pool-entry kinds diverge (instrument `ComputeOpSubgraphHash` to dump per-entry
 type+identity for an op-diverged fn like `_unpackTypeArguments` and diff two
 builds) — likely `RawValueAt` immediates and/or default-branch tagged objects
 (TypeArguments/AbstractType/ICData).
+
+### ⭐ BREAKTHROUGH (2026-06-24): the link works from a deterministic analyzer hash — NO precompiler alignment needed
+
+**The two conclusions above are SUPERSEDED.** Ran the pinpoint sub-experiment
+and it inverted the result. Instrumented `ComputeOpSubgraphHash`
+(`SANKOFA_OP_DEBUG=<UserVisibleName>` dumps each referenced pool entry in code
+order; dart-sdk `de89691ac2c`) and diffed two identical-source builds of
+`_unpackTypeArguments`:
+
+```
+[0] imm t=2 raw=0x1024f4670  ≠  0x100d58670   ← THE divergence
+[1..3] tagged id=…           =  …             ← all stable (cid→name fix worked)
+```
+
+`t=2` is **`kNativeFunction`** — the entry holds a raw engine C-function
+ADDRESS (build/load-volatile), not a stable identity. Excluding the raw
+address for `kNativeFunction` entries (keep the type marker) made the analyzer
+hash fully cross-build deterministic. Re-measured (1382-fn AOT, harness):
+
+| | matched | link% by size |
+|---|---|---|
+| identical-source recompile | **1382/1382 = 100%** (was 63.9%) | **100%** (was 49.5%) |
+| change one leaf (`hot`) | 1375/1379 = 99.71% | **99.56%** — only 4 fns ship |
+
+Distinctness preserved: subgraph_hash still **100% distinct, 0 collisions** —
+so the matching is genuine, not loose. So: **the data-only link works from a
+deterministic analyzer hash ALONE.** The ~50% ceiling was *entirely*
+build-volatile HASH inputs (class cids → fixed; raw pool index → fixed;
+**native-function addresses → the dominant one, now fixed**), NOT divergent
+pool content. **The precompiler offset-alignment consumer is NOT required for
+link matching** — scratch it from the critical path.
+
+**Caveats (validate before declaring done):**
+- Scale: this is a 1379-fn test app. A real Flutter app (100k+ fns) may surface
+  *other* volatile entry kinds (more native/FFI entries, address-bearing
+  `kImmediate`s). Re-run the harness on a real app; if identical-source link <
+  ~100%, re-instrument with `SANKOFA_OP_DEBUG` and stabilize the next kind. The
+  tooling + method are now in place.
+- This measures HASH MATCHING (→ small patches). On-device *execution* of the
+  patch (load patch-on-base, run changed code via the β.3 interpreter) is
+  separate = Tasks 6/7, still pending but already proven as a mechanism.
+
+**Revised critical path:** (1) re-validate the link at real-app scale, stabilize
+any further volatile entry kinds; (2) Tasks 6/7 — the 12 engine patches +
+`Dart_CreateIsolateGroupWithBaseSnapshot` + on-device round-trip (the actual
+remaining blocker for shipping); (3) DD only later, as a cascade optimizer for
+hot leaves (now clearly a *nice-to-have*: a 1-leaf change already links at
+99.6% without it). `compute_dd_slot_mapping` + the alignment consumer drop down
+the list.
