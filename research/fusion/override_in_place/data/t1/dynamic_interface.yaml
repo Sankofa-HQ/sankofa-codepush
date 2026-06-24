@@ -1,0 +1,5 @@
+# Allows the downloaded bytecode module to use dart:core (String literals etc).
+callable:
+  - library: 'dart:core'
+extendable:
+  - library: 'dart:core'
