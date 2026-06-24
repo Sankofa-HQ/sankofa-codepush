@@ -133,3 +133,78 @@ gains a `base_snapshot_` member + `GetBaseSnapshot()`; the shell passes
 Reuse: β.3 interpreter execution (proven, `project_codepush_beta3_cross_platform`),
 the updater grace-window (`lifecycle.rs`), v2 signed envelopes, the
 `KnownEngine` registry + CDN. The fusion is the one genuinely-new VM piece.
+
+---
+
+## 7.3 design — `Dart_CreateIsolateGroupWithBaseSnapshot` (the VM crux), grounded in the 3.44.0 VM
+
+Traced the real isolate-creation path in our dart-sdk so the splice points are
+concrete, not hypothetical:
+
+```
+Dart_CreateIsolateGroup(uri,name, snapshot_data, snapshot_instructions, …)   [dart_api_impl.cc:1328]
+  └─ new IsolateGroupSource(uri,name, snapshot_data, snapshot_instructions, kernel=null, …)   [isolate.h]
+  └─ new IsolateGroup(source,…); group->CreateHeap(); RegisterIsolateGroup
+  └─ CreateIsolate(group, is_new_group=true, …)
+       └─ Dart::InitIsolateGroupFromSnapshot(T, snapshot_data, snapshot_instructions, …)  [dart.cc:868/964]
+            └─ FullSnapshotReader reader(snapshot, instructions_buffer, T)   [app_snapshot.h:165]
+                 └─ Deserializer{ ImageReader(data_image, instructions_image),  [app_snapshot.cc]
+                                  InstructionsTable instructions_table_ }       [object.h:6107]
+                      • ImageReader maps the single `instructions_image` (.text).
+                      • InstructionsTable::EntryPointAt(i) resolves a Code's entry point.
+```
+
+So the **single** thing the whole fusion turns on: today the Deserializer
+resolves every Code's entry point into **one** instructions image. The fusion
+makes it resolve into **two** — base (executable, in the running App) for
+unchanged functions, patch (kReadOnly) for changed ones — keyed by the link
+table I already parse.
+
+### Splice points (exact)
+1. **`IsolateGroupSource`** (isolate.h): add `base_snapshot_data` +
+   `base_snapshot_instructions`. `Dart_CreateIsolateGroupWithBaseSnapshot`
+   = the §7.1/7.3 C-API mirror of `Dart_CreateIsolateGroup` that fills them
+   (the base mappings are also in my process-globals via
+   `Dart_SankofaSetBaseSnapshots`, so the source fields can even be optional).
+2. **`InitIsolateGroupFromSnapshot` / `FullSnapshotReader`** (dart.cc,
+   app_snapshot.h): thread a second `base_instructions_buffer` to a second
+   `ImageReader` (the base .text). One Deserializer, two instruction images.
+3. **Entry-point resolution** — the actual fuse. Where the Deserializer assigns
+   a Code's entry point (via `InstructionsTable` / `ImageReader`), consult the
+   link table:
+   ```
+   cpu = Dart_SankofaLookupCpuOffset(sim_offset_of_this_code)   // my 7.2 global
+   if (cpu >= 0)  entry = base_instructions_image + cpu          // unchanged → base AOT (executable)
+   else           entry = patch_instructions_image + sim         // changed → patch (kReadOnly) → interpret
+   ```
+4. **Changed-code execution** — patch instructions are mapped kReadOnly (no
+   PROT_EXEC on iOS), so a changed Code can't run its AOT bytes. It runs via
+   `dart::Interpreter::Run` (interpreter.{h,cc} present in this tree; this is
+   exactly the β.3 path proven on iPhone 14 Pro). The handoff: a Code resolved
+   to the patch image is flagged so the call path enters the interpreter
+   instead of jumping to (non-executable) machine code. Wiring this flag is the
+   join between the linker world and the proven β.3 world.
+
+### Validation ladder (each rung on-device, but cheap→dear)
+1. base only, no patch → boots normally (regression: fusion path dormant).
+2. patch with link% = 100% (identical source) → every Code resolves to base;
+   patch image referenced for nothing; app boots **unchanged**. Proves the
+   resolver + base wiring without invoking the interpreter.
+3. patch with one changed leaf → that Code resolves to the patch image + runs
+   via the interpreter; everything else base. The end-to-end win.
+
+### Open questions to resolve while implementing (not blockers, but the risk)
+- The link table is keyed on the Code's **instructions offset (sim)**; confirm
+  the Deserializer has that offset at entry-assignment time (it does — the
+  InstructionsTable is offset-indexed) so the lookup key matches what
+  `analyze_snapshot --shorebird` emitted as `offset`.
+- `InstructionsTable` assumes one contiguous image; dual-image may need it to
+  carry both ranges (or a per-Code "which image" bit).
+- The interpreter handoff flag location (Code/Function bit vs entry-point
+  trampoline) — pick whichever β.3 already uses.
+
+Net: 7.3 is bounded to **one resolver decision** (base vs patch per Code) plus
+the dual-image plumbing to feed it — not an open-ended rewrite. The data it
+needs (base mappings + sim→cpu) is already implemented + tested (§7.1/7.2,
+dart-sdk `9906367846a`). Remaining is VM-internals surgery in the Deserializer
++ the interpreter handoff, validated on-device via the ladder above.
