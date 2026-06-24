@@ -116,3 +116,37 @@ field alignment. And confirm `subgraph_hash` is computed over callee
 *identities*, not build-volatile *offsets* (the 0%-diverged `subgraph_pp` vs
 499 diverged `subgraph_hash` suggests the hash folds in something layout-
 sensitive — worth auditing as it may inflate the mismatch).
+
+### Follow-up experiment (same day): hash-stabilization is necessary but NOT sufficient
+
+Tested whether the ~50% ceiling is a *hash* problem (cheap analyzer fix) or a
+*layout* problem (the expensive precompiler consumer). Per-layer divergence on
+an identical-source recompile (684 uniquely-named fns): `self_hash` diverged
+**0**, `op_subgraph_hash` **60**, `subgraph_hash` **266** (= those 60 + **206
+pure transitive cascade**). So the root is 60 `op_subgraph_hash` divergences.
+
+`HashTaggedObjectIdentity` was folding in build-assigned class IDs (`c.id()`,
+`owner.id()`) and `ComputeOpSubgraphHash` mixed in the raw pool *index* — all
+build-volatile. Fixed both (stable scrubbed names + reference order; fork
+`d7097e660a2`), rebuilt `analyze_snapshot`, re-measured:
+
+- Hash *values* changed (confirmed in-binary), distinctness preserved (1382/1382,
+  zero collisions). **But cross-build divergence is UNCHANGED: still 60 / 266.**
+
+Conclusion: the divergence is in the **object-pool content itself** — two
+independent compiles place/value pool entries differently — which a post-hoc
+hash cannot normalize away. **There is no hash-only shortcut; the precompiler
+offset-alignment consumer is genuinely required** (this is precisely why
+Shorebird aligns the pool rather than just hashing cleverly). The committed hash
+fix is a correct prerequisite (removes known-volatile inputs, satisfies the
+Linker invariant for an *aligned* pool) but not a substitute.
+
+**So the #1 task is unchanged and now doubly-confirmed:** implement the
+patch-build alignment consumer — make the patch precompile REUSE the base's
+object-pool / class / field / dispatch offsets (`object_pool.cc`,
+`class_table.cc`, `precompiler.cc`, fed by `--base_*_link_data` which are
+currently parsed-but-ignored). Open sub-question for that work: pinpoint which
+pool-entry kinds diverge (instrument `ComputeOpSubgraphHash` to dump per-entry
+type+identity for an op-diverged fn like `_unpackTypeArguments` and diff two
+builds) — likely `RawValueAt` immediates and/or default-branch tagged objects
+(TypeArguments/AbstractType/ICData).
