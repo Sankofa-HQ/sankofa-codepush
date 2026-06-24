@@ -199,3 +199,32 @@ remaining blocker for shipping); (3) DD only later, as a cascade optimizer for
 hot leaves (now clearly a *nice-to-have*: a 1-leaf change already links at
 99.6% without it). `compute_dd_slot_mapping` + the alignment consumer drop down
 the list.
+
+### Scale validation (2026-06-24) — the deterministic hash holds; link confirmed
+
+Ran the link metric across scales + both divergence sources (independent
+kernel recompile AND gen_snapshot non-determinism). All measured locally.
+
+| Test | Scale | Link % | Distinct |
+|---|---|---|---|
+| same kernel, 2× gen_snapshot — **real Flutter app** (hello_codepush) | 17,273 fns | **100%** | 99.44% (all collisions benign) |
+| 2 independent identical-source compiles (toy) | 1,379 fns | **100%** | 100% |
+| 2 independent identical-source compiles (breadth-heavy: convert/math/typed_data/collection/async + 250 classes) | 2,662 fns | **100%** | 100% |
+| one-leaf change (`hot`) | 1,379 fns | **99.56%** (4 fns ship) | — |
+
+- **gen_snapshot IS non-deterministic** (AOT bytes differ on the same kernel) —
+  reproduced at 17k-fn scale — yet the analyzer hash matches 100%. Handled.
+- The 17k-fn **collisions are all benign**: every colliding group shares one
+  `self_hash` (identical IL — e.g. `as Future<dynamic>` vs `as Future<void>`).
+  Zero different-IL collisions ⇒ no false-match risk; the linker maps same-hash
+  groups positionally, which is correct for genuinely-identical code.
+- Sanity: linking two *different* hello_codepush builds gave 10% — confirmed to
+  be genuinely different code (80% different `self_hash`, incl. SDK operators),
+  not a fix gap. So the 100%s above are real cross-build stability, not looseness.
+
+**Conclusion: the data-only link is validated end-to-end at real-app scale from
+a deterministic analyzer hash alone.** Last optional gate before calling the
+link "done": two identical-source *full Flutter framework* builds (cross-kernel-
+compile at 50k+ fns) — high confidence given the 17k cross-gen_snapshot + 2.6k
+cross-compile results already pass. The remaining real blocker to shipping iOS
+code-push is **Tasks 6/7** (engine fusion + on-device), not the link.
