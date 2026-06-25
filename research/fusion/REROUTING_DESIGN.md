@@ -219,6 +219,30 @@ pass 1 emit identity + compute table + slot mapping; pass 2 gen_snapshot with
   (3) Bytecode serialization cluster → (4) run hybrid.aot, verify changed fn
   interprets while rest is native (no JIT) → (5) trampolines for virtual →
   (6) DD for static unchanged→changed → (7) engine-shell + iOS device.
+- **2026-06-25 — IN-PROGRAM PRODUCER works (verified).** Added env-gated
+  `SANKOFA_INPROGRAM` to dart2bytecode (`dart2bytecode.dart`: skip
+  `prefixLibraryUris`; also needed `import 'dart:io' ... show ..., Platform`).
+  Running it on `main.dart` (no import-dill, no prefix) emits bytecode whose
+  library uri is `dev-dart-app:/data/t1/main.dart` — IDENTICAL to the base AOT
+  kernel's uri (vs the prior `dev-dart-app:UNUSED/...` prefix that made it a
+  separate program). So the producer now yields program-consistent bytecode the
+  merge can match by canonical name. (Change lives in the ENGINE TREE; the fork's
+  3.11.5 dart2bytecode predates the prefix feature — fork reconciliation is later.)
+  VERSION-CHURN LESSON: object.cc IS in the snapshot-version-hash set — the
+  earlier kernel-offset guards bumped ad85cd24→0b3b43bb and left the toolchain
+  inconsistent (dart2bytecode snapshot built against a stale vm_platform.dill).
+  Reverted those guards (in-program has consistent metadata, doesn't need them)
+  and did a clean consistent rebuild (gen_snapshot, dartaotruntime_product,
+  analyze_snapshot, both vm_platform dills, gen_kernel + dart2bytecode snapshots).
+  Rule: avoid editing version-hash files (object.cc/dart_api*.h) mid-stream; keep
+  changes in bin/ + compiler/ + read.cc + dart2bytecode where possible.
+  **NEXT: the merge-load CONSUMER** — gen_snapshot must load the no-prefix
+  bytecode and ATTACH it to the EXISTING (kernel-loaded) functions by canonical
+  name instead of throwing "library already loaded" (BytecodeLoader
+  ReadLibraryDeclarations). This is the BytecodeLoader "merge/patch" mode: for an
+  existing library/class/function, resolve to the existing object + AttachBytecode
+  + mark is_declared_in_bytecode, rather than Library::New. Then CompileFunction
+  skip (done) keeps them, AOT the rest, Bytecode serialization cluster, run.
 - **NEXT STEP (exact):** in `Precompiler::CompileFunction` (precompiler.cc:3660),
   for a function in the "changed set", attach its bytecode + set
   `is_declared_in_bytecode` + `SetInstructions(StubCode::InterpretCall())` and
