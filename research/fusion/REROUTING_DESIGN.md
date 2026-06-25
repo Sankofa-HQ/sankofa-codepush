@@ -4,6 +4,47 @@ Status as of 2026-06-25. This is the engineering plan for the LAST architectural
 piece of arbitrary-logic (crash-fix / large-update) iOS code-push. Everything
 upstream of it is proven device-free in our own engine.
 
+## ⚖️ DECISION LOCKED (2026-06-25): FUSION + DD is the architecture
+
+We evaluated two architectures and committed to one. **Do not re-litigate.**
+
+- **Override-in-place** (transplant a changed function's bytecode onto the live
+  base function): PROVED the *execution primitive* (a live AOT function runs new
+  downloaded bytecode via the interpreter, no JIT). But it is the WRONG
+  architecture for rerouting: it mutates the running base isolate, whose linkage
+  is baked, so it must re-solve rerouting for EVERY call kind at runtime —
+  baked static calls (need DD), dispatch-table calls (baked), AND switchable/
+  monomorphic instance calls (TESTED: forcing switchable via
+  SANKOFA_NO_TABLE_DISPATCH made the call switchable but it STILL didn't reroute,
+  because a monomorphic instance call enters at the *monomorphic* entry point and
+  the InterpretCall stub installed by AttachBytecode isn't set up for that entry
+  — see `SetInstructionsSafe`). Re-building all of that at runtime is MORE work
+  than the proven path, with more correctness surface.
+- **Fusion** (Shorebird's proven production model): create the isolate from the
+  PATCH snapshot, so its dispatch table, monomorphic entry points, and call sites
+  are internally consistent *by construction* — rerouting is correct for free for
+  every call kind. The fuse (`Dart_SankofaResolveEntryPoint`, proven
+  base_hits=1375) redirects UNCHANGED functions' instructions to the base image
+  so they aren't re-shipped. The only residual rerouting gap is
+  unchanged(base-instruction)-calls-changed, which is exactly what DD fixes
+  (route those calls through an indirect slot).
+
+**Therefore the path is: FUSION + hybrid snapshot (changed fns → bytecode in the
+patch snapshot) + DD (for unchanged→changed call edges) + the proven fuse.**
+The override-in-place transplant primitive is retained as the proof that the
+interpreter runs downloaded code no-JIT (it's the same Interpreter::Run the
+fusion model uses for changed functions), but it is NOT the production patch path.
+
+Remaining build (multi-week, deep VM/serializer work):
+1. Hybrid snapshot: gen_snapshot emits changed fns as bytecode (Code=InterpretCall
+   stub, correct entry kinds) AND the app-snapshot serializer/deserializer carry
+   that bytecode (today `app_snapshot.cc` has NO bytecode handling — the core
+   gap). Build-time emission gives correct monomorphic/unchecked entries for free
+   (unlike runtime transplant).
+2. DD consumer for unchanged→changed edges (producer done): see §B below.
+3. CLI (2-pass build + diff) → engine-shell (load patch snapshot + fuse + create
+   fused isolate, per patches 0006/0010) → iOS rebuild → on-device round-trip.
+
 ## What is already PROVEN (device-free, committed)
 
 1. **Unchanged code → base AOT** (the "fuse"): `analyze_snapshot --fusion_selftest`
