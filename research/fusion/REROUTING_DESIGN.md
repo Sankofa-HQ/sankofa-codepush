@@ -158,6 +158,22 @@ pass 1 emit identity + compute table + slot mapping; pass 2 gen_snapshot with
   to symbolize the SEGV, then handle bytecode functions in the precompiler
   reachability + add the Bytecode serialization cluster.** This is the deep core
   of the multi-week build.
+- **2026-06-25 — SEGV diagnosed via lldb: `KernelProgramInfo::KernelLibraryStartOffset(-1)`.**
+  The transplanted bytecode function's class carries `kernel_library_index = -1`
+  (set at object.cc:8328 for component-loaded classes) and/or a null
+  `kernel_component`. The precompiler/serializer kernel-access path calls
+  `KernelLibraryStartOffset` (object.cc) WITHOUT the `-1` guard that exists at
+  object.cc:11458 — `ASSERT(library_index >= 0)` is compiled out in release →
+  `blob.DataAddr(neg)` SEGV. So a base function given a patch-component's
+  bytecode has inconsistent kernel metadata, and the native-only AOT pipeline
+  trips on it. **Fix direction:** the bytecode component must be integrated so
+  the transplanted function's kernel metadata is consistent (or the relevant
+  kernel-access paths must guard `-1`/handle bytecode functions). This is the
+  first of the native-only assumptions to fix; expect more crashes downstream
+  (serializer Bytecode cluster, dispatch entries). WIP scaffolding (env-gated
+  `SANKOFA_GENSNAP_PATCH` in gen_snapshot.cc + CompileFunction skip in
+  precompiler.cc) lives in the ENGINE TREE only (harmless to normal builds);
+  sync to the fork once the integration works.
 - **NEXT STEP (exact):** in `Precompiler::CompileFunction` (precompiler.cc:3660),
   for a function in the "changed set", attach its bytecode + set
   `is_declared_in_bytecode` + `SetInstructions(StubCode::InterpretCall())` and
