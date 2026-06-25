@@ -132,6 +132,33 @@ pass 1 emit identity + compute table + slot mapping; pass 2 gen_snapshot with
    integration (updater loads patch, transplants, flushes/updates slots at boot)
    → iOS rebuild → on-device round-trip (iPhone 14 Pro).
 
+## Build log (own-engine grind)
+
+- **2026-06-25 — post-precompile transplant is IGNORED by the AOT serializer
+  (verified, dead end).** Added an env-gated build-time transplant in
+  gen_snapshot AFTER `Dart_Precompile()` (load patch bytecode component +
+  `Dart_SankofaTransplantBytecode` compute<-patched). It serialized cleanly
+  (no crash) BUT the resulting snapshot still ran the NATIVE `compute()` (=BASE)
+  on `dartaotruntime_product`. Reason: the AOT serializer writes the
+  precompiler's finalized code/instructions tables, not post-hoc `Function.code`
+  changes. **Conclusion: changed functions must be emitted as bytecode INSIDE
+  the precompiler so the finalized tables reflect it.** Reverted the probe.
+- **NEXT STEP (exact):** in `Precompiler::CompileFunction` (precompiler.cc:3660),
+  for a function in the "changed set", attach its bytecode + set
+  `is_declared_in_bytecode` + `SetInstructions(StubCode::InterpretCall())` and
+  SKIP `helper.Compile()` — so the precompiler treats it as a bytecode function
+  from the start. Prereqs: (a) the changed fns' bytecode must be available during
+  precompile (load the dart2bytecode component before CompileAll, transplant onto
+  the existing Function objects — same primitive, earlier in the pipeline);
+  (b) the AOT serializer must serialize `is_declared_in_bytecode` functions'
+  Bytecode object — normal AOT snapshots have none, so this is the Bytecode
+  serialization cluster to ADD in app_snapshot.cc (no kBytecodeCid cluster
+  today → it will FATAL/UnexpectedObject; that error will pinpoint the fields to
+  serialize). (c) Then dispatch trampolines (build-time `R0=fn; jmp
+  InterpretCallStub`) for the virtual case — the InterpretCall stub expects the
+  Function in R0/FUNCTION_REG (stub_code_compiler_arm64.cc:3176), which
+  EmitDispatchTableCall does NOT set.
+
 ## Injection points (grounded)
 - static call lowering:  `runtime/vm/compiler/backend/flow_graph_compiler.cc:956`
 - virtual call lowering: `runtime/vm/compiler/backend/il.cc:5435`
