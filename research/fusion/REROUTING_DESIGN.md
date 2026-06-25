@@ -174,6 +174,25 @@ pass 1 emit identity + compute table + slot mapping; pass 2 gen_snapshot with
   `SANKOFA_GENSNAP_PATCH` in gen_snapshot.cc + CompileFunction skip in
   precompiler.cc) lives in the ENGINE TREE only (harmless to normal builds);
   sync to the fork once the integration works.
+- **2026-06-25 — cross-program build-time transplant is the WRONG FOUNDATION
+  (ruled out after grinding 2 crashes).** Guarded `KernelLibraryStartOffset`/
+  `EndOffset` for null-blob + `-1` + out-of-bounds index (object.cc) — each fix
+  advanced to the NEXT crash in the same kernel-metadata path. Root cause: a
+  function transplanted with bytecode from a SEPARATE dart2bytecode component
+  carries that component's program metadata (kernel_library_index, kernel_component,
+  AND the bytecode's constant-pool refs point into the patch component). The
+  precompiler/serializer pervasively assume one consistent program, so guarding
+  symptoms won't converge, and dropping the patch library would dangle compute's
+  bytecode pool refs. **CONCLUSION: the bytecode for changed functions must be
+  generated IN the base program (one kernel), not transplanted from a separate
+  component.** The proper hard way = teach gen_kernel/the front_end (pkg/dart2bytecode
+  + pkg/vm kernel_front_end) to emit a HYBRID KERNEL where the changed functions
+  carry bytecode and the rest carry IL, all in one program; then gen_snapshot
+  keeps bytecode for those (CompileFunction skip) + AOT-compiles the rest, and
+  the serializer carries the Bytecode (consistent metadata). The object.cc guards
+  are harmless defensive code; the transplant scaffolding in gen_snapshot.cc is a
+  dead end for production (keep only as the runtime-execution proof). NEXT:
+  in-program hybrid-kernel emission in the Dart front_end.
 - **NEXT STEP (exact):** in `Precompiler::CompileFunction` (precompiler.cc:3660),
   for a function in the "changed set", attach its bytecode + set
   `is_declared_in_bytecode` + `SetInstructions(StubCode::InterpretCall())` and
