@@ -298,6 +298,31 @@ pass 1 emit identity + compute table + slot mapping; pass 2 gen_snapshot with
   bytecode attaches and we run hybrid.aot expecting compute()=PATCH-VIA-MERGE.
   Producer test recipe: build patched.bytecode with SANKOFA_INPROGRAM (no-prefix);
   `SANKOFA_GENSNAP_PATCH=patched.bytecode gen_snapshot ... main_aot.dill(BASE)`.
+- **2026-06-25 — merge-load ATTACHES correctly; precompiler-lifecycle whack-a-mole remains.**
+  Cleared four layers to get the merge driving the load + attaching bytecode:
+  (1) skip "already loaded" throw; (2) resolve existing classes; (3) manual
+  current-funcs scan (LookupFunction* RELEASE_ASSERTs is_finalized); (4) skip the
+  dyn-module `main` entry-ref resolution in merge (LoadBytecode); (5) EnsureIsFinalized
+  the base class FIRST (kernel classes lazily finalize → functions absent → empty
+  redirect); (6) scan/redirect over `functions()` (same array ReadPendingCode
+  iterates); (7) mark merged class is_loaded so finalize doesn't re-load.
+  VERIFIED via raw-pointer diagnostics IN ONE RUN: `[attach] compute @0x107af9dc0
+  hasbc=1` (bytecode attaches to the real base fn) but precompile shows TWO
+  computes: `[cf] @0x1091f75c0 hasbc=0` (a DUPLICATE, no bytecode) and `[cf]
+  @0x107af9dc0 hasbc=0` (MINE — bytecode CLEARED before its CompileFunction). So
+  two deep issues remain: (A) a DUPLICATE compute object (likely the library-dict
+  function vs the class-functions() function diverged during the merge's lazy
+  load; the precompiler reaches both); (B) my attached bytecode is wiped before
+  its CompileFunction despite guarding the line-888 `ClearICDataArray(!HasBytecode)`
+  — another clear path, suspect `ProgramVisitor::Dedup` (precompiler.cc:649) or an
+  ic_data reset. NEXT: find/guard the second clear path + make the dict and
+  class share ONE function object (or attach to both) so the precompiler compiles
+  the bytecode compute, not the duplicate. The merge code is engine-tree WIP,
+  gated (default off → normal builds unaffected); diagnostics (`[sankofa-*]`) are
+  left in for the next session. ASSESSMENT: this is the deep precompiler-internals
+  integration Shorebird did in their private dart-sdk; bytecode attachment is
+  solved, the precompiler function-lifecycle (dedup/clear/duplicate) is the
+  remaining fiddly surface.
 - **NEXT STEP (exact):** in `Precompiler::CompileFunction` (precompiler.cc:3660),
   for a function in the "changed set", attach its bytecode + set
   `is_declared_in_bytecode` + `SetInstructions(StubCode::InterpretCall())` and
