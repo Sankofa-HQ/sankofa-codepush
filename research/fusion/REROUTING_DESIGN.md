@@ -193,6 +193,32 @@ pass 1 emit identity + compute table + slot mapping; pass 2 gen_snapshot with
   are harmless defensive code; the transplant scaffolding in gen_snapshot.cc is a
   dead end for production (keep only as the runtime-execution proof). NEXT:
   in-program hybrid-kernel emission in the Dart front_end.
+- **2026-06-25 — IN-PROGRAM hybrid design SCOPED (the correct path, all integration points located).**
+  Why cross-program failed: `dart2bytecode` (dart2bytecode.dart:318/327) PREFIXES
+  the new libraries and only emits bytecode for libs NOT in the base
+  (`loadedLibraries`) → the module is a separate program. Fix: generate the
+  changed-fn bytecode from the SAME `Component` the kernel was compiled from, so
+  all canonical names/refs match the base program. Integration points:
+  - `generateBytecode(component, sink, libraries:..., ...)` (pkg/dart2bytecode/
+    lib/bytecode_generator.dart:60) emits bytecode PER-LIBRARY for the given
+    `libraries` of a Component. Run it on the SAME Component gen_kernel compiled,
+    passing the CHANGED libraries (coarse but correct; per-function selectivity =
+    later optimization via a custom visitLibrary filter).
+  - `pkg/vm/bin/gen_kernel.dart` / `pkg/vm/lib/kernel_front_end.dart` (no bytecode
+    refs today) is where to emit IL kernel + the same-Component bytecode component
+    as a paired artifact.
+  - gen_snapshot MERGE-loads that bytecode component into the IL program (refs
+    resolve to existing libs because same compile), marks fns is_declared_in_bytecode;
+    `Precompiler::CompileFunction` skip (already added) keeps them; rest AOT.
+  - Then: Bytecode serialization cluster (app_snapshot.cc, model on kCodeCid:7802)
+    + build-time dispatch trampolines (`R0=fn; jmp InterpretCallStub`, since
+    EmitDispatchTableCall doesn't set R0/FUNCTION_REG) + deserializer.
+  BUILD ORDER: (1) a tool/gen_kernel mode emitting IL + same-Component bytecode for
+  marked libs → (2) gen_snapshot merge-load (verify no cross-program crash; the
+  consistency should avoid the KernelLibraryStartOffset class of crashes) →
+  (3) Bytecode serialization cluster → (4) run hybrid.aot, verify changed fn
+  interprets while rest is native (no JIT) → (5) trampolines for virtual →
+  (6) DD for static unchanged→changed → (7) engine-shell + iOS device.
 - **NEXT STEP (exact):** in `Precompiler::CompileFunction` (precompiler.cc:3660),
   for a function in the "changed set", attach its bytecode + set
   `is_declared_in_bytecode` + `SetInstructions(StubCode::InterpretCall())` and
