@@ -266,6 +266,38 @@ pass 1 emit identity + compute table + slot mapping; pass 2 gen_snapshot with
   This is all-or-nothing (must compile coherently); implement as one unit.
   After it: `CompileFunction` skip (done) keeps the merged fns as bytecode, rest
   AOT; then the Bytecode serialization cluster; then run hybrid.aot.
+- **2026-06-25 — merge-load CONSUMER implemented + driving the load (engine tree, gated).**
+  Implemented the BytecodeLoader "merge mode" (gated by a process-global toggle
+  `Dart_SankofaSetBytecodeMerge`, read in `BytecodeLoader::LoadBytecode`; default
+  off → normal dynamic-module loads unaffected). Changes in bytecode_reader.{h,cc}:
+  `ReadLibraryDeclarations` (skip "already loaded" throw, reuse existing lib),
+  `ReadLibraryDeclaration` (resolve existing classes via LookupClassAllowPrivate /
+  toplevel_class instead of Class::New), `ReadClassDeclaration` (guard asserts +
+  skip re-stamping script/super/interfaces on the finalized base class),
+  `ReadFunctionDeclarations` (redirect each code-offset onto the EXISTING base
+  function found by a MANUAL scan over current_functions() — Class::LookupFunction*
+  RELEASE_ASSERTs is_finalized() which isn't true mid-load — and skip
+  cls.SetFunctions / toplevel re-add), `ReadMembers` (guard is_loaded asserts),
+  `ReadPendingCode` (for merge, explicitly run ReadClassDeclaration + ReadMembers
+  per class since EnsureIsFinalized no-ops the already-finalized base class, then
+  ReadCode guarded by HasOffset). gen_snapshot merges pre-precompile;
+  `Precompiler::CompileFunction` now skips `HasBytecode()` fns (not just
+  is_declared_in_bytecode — AttachBytecode doesn't set that flag). VERSION NOTE:
+  bytecode_reader.cc/.h are NOT in the snapshot-version-hash set (verified) → no
+  toolchain rebuild needed for merge edits; trigger flag lives in read.cc +
+  analyze_snapshot_api.h (also not in the set), NOT dart_api*.h.
+  PROGRESS: the merge now drives the load — all 3 test classes (::, Widget,
+  Widget2) process and offsets redirect (fixed: type-error, is_loaded gate,
+  is_finalized RELEASE_ASSERT). **CURRENT BLOCKER:** `bytecode_reader.cc:1176
+  FATAL "Unable to find function main"` — the component references `main` (its
+  dyn-module entry point) and the kMember resolver (`Resolver::ResolveFunction`
+  after `cls.EnsureIsFinalized`) can't resolve it against the base during the
+  pre-precompile merge load (base finalization/lookup state, or the entry-point
+  ref shouldn't be resolved in merge). NEXT: diagnose (finalize base before
+  merge? / skip dyn-module entry resolution in merge?), then the changed fn's
+  bytecode attaches and we run hybrid.aot expecting compute()=PATCH-VIA-MERGE.
+  Producer test recipe: build patched.bytecode with SANKOFA_INPROGRAM (no-prefix);
+  `SANKOFA_GENSNAP_PATCH=patched.bytecode gen_snapshot ... main_aot.dill(BASE)`.
 - **NEXT STEP (exact):** in `Precompiler::CompileFunction` (precompiler.cc:3660),
   for a function in the "changed set", attach its bytecode + set
   `is_declared_in_bytecode` + `SetInstructions(StubCode::InterpretCall())` and
