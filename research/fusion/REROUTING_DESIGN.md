@@ -243,6 +243,29 @@ pass 1 emit identity + compute table + slot mapping; pass 2 gen_snapshot with
   existing library/class/function, resolve to the existing object + AttachBytecode
   + mark is_declared_in_bytecode, rather than Library::New. Then CompileFunction
   skip (done) keeps them, AOT the rest, Bytecode serialization cluster, run.
+- **2026-06-25 — merge-load CONSUMER fully mapped (next focused unit).** The
+  bytecode loader's declaration path must gain a "merge" mode (thread a
+  `bool merge_existing` flag) that, for an already-loaded program element,
+  RESOLVES to the existing object + attaches bytecode, instead of `*::New`.
+  Exact function map in `runtime/vm/bytecode_reader.cc`:
+  - `ReadLibraryDeclarations` (~2489): the verify-loop THROWS "already loaded"
+    for existing libs — change to: for an existing non-dart lib, take the
+    existing Library (LookupLibrary) and call the declaration reader in merge
+    mode (instead of `Library::New` + Register).
+  - `ReadLibraryDeclaration` (2434): per class, `Class::New(...)` (2468/2473) →
+    in merge mode use `library.LookupClass(name)` / existing `toplevel_class()`;
+    skip `library.SetName`/`SetLoaded` re-stamping.
+  - `ReadClassDeclaration` (2308): in merge mode skip re-setting class flags/
+    super/interfaces (already set on the AOT class); still `SetOffset(cls,
+    members_offset)` so members are read.
+  - `ReadMembers` (read at members_offset; creates `Function::New`/`Field::New`)
+    → in merge mode resolve existing members (`cls.LookupFunction`) and on each,
+    attach bytecode. CAUTION: an existing AOT function HAS Code (+ maybe ICData
+    in `ic_data_array_or_bytecode`); `AttachBytecode` asserts that slot is null →
+    clear it / handle before attaching, and set `is_declared_in_bytecode`.
+  This is all-or-nothing (must compile coherently); implement as one unit.
+  After it: `CompileFunction` skip (done) keeps the merged fns as bytecode, rest
+  AOT; then the Bytecode serialization cluster; then run hybrid.aot.
 - **NEXT STEP (exact):** in `Precompiler::CompileFunction` (precompiler.cc:3660),
   for a function in the "changed set", attach its bytecode + set
   `is_declared_in_bytecode` + `SetInstructions(StubCode::InterpretCall())` and
