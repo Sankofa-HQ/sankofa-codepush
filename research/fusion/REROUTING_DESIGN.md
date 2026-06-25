@@ -143,6 +143,21 @@ pass 1 emit identity + compute table + slot mapping; pass 2 gen_snapshot with
   precompiler's finalized code/instructions tables, not post-hoc `Function.code`
   changes. **Conclusion: changed functions must be emitted as bytecode INSIDE
   the precompiler so the finalized tables reflect it.** Reverted the probe.
+- **2026-06-25 — pre-precompile transplant CRASHES the precompiler (SEGV,
+  si_addr=-1).** Moved the transplant BEFORE `Dart_Precompile` (so the function
+  is `is_declared_in_bytecode` when the precompiler runs) and added a
+  `CompileFunction` early-return for bytecode functions. The transplant logged
+  OK, then gen_snapshot SEGV'd during precompile/serialize (release build = no
+  symbolized frames). So the `CompileFunction` skip is necessary but NOT
+  sufficient — the precompiler's reachability trace (`ProcessFunction`/
+  `AddCalleesOf`), finalization, and/or the serializer don't handle a function
+  whose body is bytecode. Bytecode functions never appear in a normal AOT
+  snapshot, so every native-only assumption in that pipeline must be taught to
+  handle them. Scaffolding left in place (env-gated `SANKOFA_GENSNAP_PATCH`,
+  harmless to normal builds). **Next debugging step: lldb or a debug gen_snapshot
+  to symbolize the SEGV, then handle bytecode functions in the precompiler
+  reachability + add the Bytecode serialization cluster.** This is the deep core
+  of the multi-week build.
 - **NEXT STEP (exact):** in `Precompiler::CompileFunction` (precompiler.cc:3660),
   for a function in the "changed set", attach its bytecode + set
   `is_declared_in_bytecode` + `SetInstructions(StubCode::InterpretCall())` and
