@@ -1,5 +1,9 @@
-# Allows the downloaded bytecode module to use dart:core (String literals etc).
+# Allows the downloaded bytecode module to use dart:core (String literals etc)
+# and the base app library (so a re-shipped bytecode function can construct base
+# Widget classes + drive a virtual call through the interpreter = cascade probe).
 callable:
   - library: 'dart:core'
+  - library: 'dev-dart-app:/data/t1/main.dart'
 extendable:
   - library: 'dart:core'
+  - library: 'dev-dart-app:/data/t1/main.dart'

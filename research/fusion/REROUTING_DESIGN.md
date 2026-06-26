@@ -40,17 +40,24 @@
 > no-JIT runtime. A bytecode function's calls are interpreter-dispatched (the
 > interpreter sets up FUNCTION_REG and resolves to the function's CURRENT Code),
 > so a re-shipped (bytecode) caller reroutes to patched code with NO trampoline
-> and NO DD. **So the MVP = ship the changed fns + their static-caller cascade
-> (up to the nearest fresh-dispatch boundary) all as bytecode; the cascade
-> INTERIOR reroutes for free.** DD/trampolines only (a) limit how far the cascade
-> extends for high-fan-in fns, and (b) handle the ENTRY boundary where unchanged
-> base-AOT code calls into the cascade via a baked static call. The remaining
-> boundary work: static entry edge = DD (producer done) OR extend cascade to a
-> fresh-dispatch point; VIRTUAL entry edge (e.g. Flutter framework → your
-> build()) = switchable calls + IC flush (§A below) — `renderNew()` still shows
-> `BASE-UI` because `render` is base AOT doing a baked dispatch-table call.
-> Everything upstream (keep-bytecode, merge consumer, fuse, analyzer link@99.6%,
-> β.3 exec on device, AND now cascade rerouting) is proven device-free.
+> and NO DD. **So the MVP = ship the changed fns + their caller cascade (up to
+> the nearest fresh-dispatch boundary) all as bytecode; the cascade INTERIOR
+> reroutes for free — STATIC *and* VIRTUAL calls.** Probe 3b proved the virtual
+> half: after also transplanting `renderNew`←`renderNewViaPatched` (a bytecode
+> body doing `ws[0].build()`), `renderNew()` reports `render-> PATCH-UI-FIXED` —
+> the interpreter resolves the virtual call on the receiver's class at call time
+> and lands on the transplanted `Widget.build`, no dispatch-table update. (With
+> only `Widget.build` transplanted, `renderNew()` stayed `render-> BASE-UI`
+> because base-AOT `render` does a baked dispatch-table call.) DD/trampolines
+> only (a) limit how far the cascade extends for high-fan-in fns, and (b) handle
+> the ENTRY boundary where unchanged base-AOT code calls into the cascade: static
+> entry edge = DD (producer done) OR extend cascade to a fresh-dispatch point;
+> virtual entry edge (Flutter framework → your build()) = switchable calls + IC
+> flush (§A below). **Everything upstream is proven device-free: keep-bytecode,
+> merge consumer, fuse, analyzer link@99.6%, β.3 exec on device, AND now full
+> (static+virtual) cascade-interior rerouting.** Remaining = entry-boundary
+> mechanism + CLI cascade computation + engine-shell boot integration + iOS
+> device round-trip.
 
 Status as of 2026-06-25. This is the engineering plan for the LAST architectural
 piece of arbitrary-logic (crash-fix / large-update) iOS code-push. Everything
