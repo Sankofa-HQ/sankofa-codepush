@@ -1,35 +1,43 @@
 # Sankofa CodePush iOS — arbitrary-logic rerouting design (DD layer)
 
-> ⛔ **SUPERSEDED (2026-06-26) — the "hybrid snapshot / serializer carries
-> bytecode" build step below is a DEAD END. Active plan:
+> 🔧 **REFINED (2026-06-26) — one TACTIC below is a dead end, but the hybrid
+> bytecode-shaped patch snapshot is STILL REQUIRED. Companion plan:
 > [`../IOS_DATA_ONLY_PORT_PLAN.md`](../IOS_DATA_ONLY_PORT_PLAN.md).**
 >
-> The FUSION-vs-override decision still stands (we are NOT re-litigating that —
-> override-in-place can't reroute monomorphic/dispatch calls). What's superseded
-> is the *delivery sub-mechanism*: baking changed-function bytecode into the AOT
-> snapshot via a new serialization cluster (build step 1 below).
+> FUSION-vs-override stands (not re-litigating). And fusion genuinely NEEDS the
+> changed functions to be **bytecode-shaped in the patch snapshot**: on iOS the
+> patch image is `kReadOnly` (no PROT_EXEC), so a changed function's *native*
+> code in the patch image cannot execute — it MUST be bytecode (interpreted).
+> So `Dart_CreateIsolateGroupWithBaseSnapshot` of a *normal* (all-native) patch
+> snapshot can't run changed code on iOS. The hybrid shape is unavoidable.
 >
-> **Why it's a dead end (confirmed at the wall, 2026-06-26):** the AOT snapshot
-> format deliberately carries NO bytecode. `FunctionSerializationCluster` in
-> `kFullAOT` writes only `code()` (the bytecode slot is JIT-only) and there is
-> no Bytecode cluster. A `Bytecode` object owns an `object_pool` (a deep graph
-> resolving to functions/classes/constants), a `binary` blob, exception
-> handlers, and pc/var descriptors — Dart never serializes it; it is rebuilt at
-> runtime by `BytecodeLoader` from `binary`. Baking the constructed object +
-> pool into the snapshot fights the framework. (I got `hybrid.aot` to *build*
-> after fixing the precompiler keep-bytecode + a `ProgramVisitor::Dedup` RO-stub
-> write-fault, but it carries no bytecode and faults in `ReadDispatchTable`.)
+> **The DEAD TACTIC (confirmed at the wall, 2026-06-26):** serializing the
+> constructed `Bytecode` OBJECT into the AOT snapshot. `kFullAOT`
+> `FunctionSerializationCluster` writes only `code()` (the bytecode slot is
+> JIT-only), there is no Bytecode cluster, and a `Bytecode` object owns a deep
+> `object_pool` graph (functions/classes/constants) + `binary` blob + descriptors
+> that Dart never serializes — `BytecodeLoader` rebuilds it at runtime from
+> `binary`. (I got `hybrid.aot` to *build* after fixing precompiler keep-bytecode
+> + a `ProgramVisitor::Dedup` RO-stub write-fault + a `WriteDispatchTable`
+> stub-Code encode, but it carries no bytecode and faults in `ReadDispatchTable`.)
 >
-> **The proven alternative achieves the SAME fusion without serialization:**
-> `Dart_CreateIsolateGroupWithBaseSnapshot` composes base+patch at isolate
-> creation; unchanged code runs base AOT, changed code runs via the β.3
-> interpreter (`Interpreter::Run`) — already proven on iPhone 14 Pro AND
-> Galaxy A14. The data-only LINK works from a deterministic analyzer hash alone
-> (100% identical-source, 99.6% one-leaf-change), so neither the serializer
-> cluster NOR precompiler offset-alignment is needed. See the port plan.
+> **The RIGHT TACTIC (keeps the hybrid shape, drops the object-graph
+> serialization):** gen_snapshot emits changed fns as **bytecode-SHAPED**
+> (`Code` = InterpretCall stub, call sites built for the interpreter convention),
+> but the bytecode BINARY ships separately (or as a plain TypedData blob) and is
+> attached at deserialize/boot via the merge-mode `BytecodeLoader` (the
+> `bytecode_reader.cc` consumer already built). This reuses the proven β.3
+> runtime-load (`Dart_LoadLibraryFromBytecode`) instead of inventing AOT bytecode
+> serialization. The serializer STILL must tolerate stub-`Code` functions (the
+> dedup RO-stub guard + dispatch-table stub-encode fixes are correct and needed).
 >
-> Build log below is retained for the proven primitives (the fuse, no-JIT exec,
-> the rerouting call-kind table) and the dead-end findings.
+> **The genuine remaining DEEP piece = build-time interpreter call convention
+> ("trampolines"):** a baked PC-relative static call / dispatch-table call to a
+> changed fn jumps to the InterpretCall stub WITHOUT setting `FUNCTION_REG`, so
+> per-target trampolines (load Function → InterpretCall) are needed at the call
+> site / DD slot / dispatch entry. This + the DD consumer (producer done) is the
+> multi-week grind. Everything upstream (keep-bytecode, merge consumer, fuse,
+> analyzer link@99.6%, β.3 exec on device) is proven.
 
 Status as of 2026-06-25. This is the engineering plan for the LAST architectural
 piece of arbitrary-logic (crash-fix / large-update) iOS code-push. Everything
