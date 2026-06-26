@@ -86,6 +86,15 @@ echo "### 3. compile extracted changed-set module -> patch.bytecode ###"
   "dev-dart-app:/data/$MODULE_SRC.dart"
 ls -la "$WORK/patch.bytecode"
 
+# Stage the DEVICE patch artifact = exactly what the engine boot hook
+# (DartIsolate::SankofaApplyBootPatch, SANKOFA_PATCH_DIR) reads on the iPhone:
+#   sankofa_patch.bytecode  + sankofa_patch.names (comma-separated changed set)
+PATCH_OUT="$WORK/patch_out"; mkdir -p "$PATCH_OUT"
+cp "$WORK/patch.bytecode" "$PATCH_OUT/sankofa_patch.bytecode"
+printf '%s' "$FNS" > "$PATCH_OUT/sankofa_patch.names"
+echo "    device patch staged in $PATCH_OUT (SANKOFA_PATCH_DIR):"
+ls -la "$PATCH_OUT"
+
 echo "### 4. APPLY (NO JIT): transplant manifest targets, invoke $INVOKE() ###"
 "$ANALYZE" --bytecode_patch="$WORK/patch.bytecode" --patch_fns="$FNS" \
   --patch_invoke="$INVOKE" "$WORK/base.aot"
