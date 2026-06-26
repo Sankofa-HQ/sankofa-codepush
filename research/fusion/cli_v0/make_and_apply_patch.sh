@@ -78,21 +78,35 @@ PY
 )
 echo "    diff says transplant: $FNS"
 
-echo "### 3. compile extracted changed-set module -> patch.bytecode ###"
+echo "### 3. generate self-contained module (manifest embedded) + compile -> patch.bytecode ###"
+# The patch is ONE self-contained file: the changed-set functions + a generated
+# _sankofaManifest() (the app-scoped changed names from the diff) + a dyn-module
+# entry that retains the changed fns (tear-offs) + the manifest. The DEVICE boot
+# hook calls _sankofaManifest() to learn what to transplant — no loose .names.
+python3 - "$WORK/data/$MODULE_SRC.dart" "$WORK/data/_patch_full.dart" "$FNS" <<'PY'
+import sys
+mod_src, out, fns = sys.argv[1], sys.argv[2], sys.argv[3]
+names = [n for n in fns.split(',') if n]
+body = open(mod_src).read()
+quoted = ', '.join("'%s'" % n for n in names)
+tearoffs = ', '.join(names + ['_sankofaManifest'])
+body += "\n@pragma('vm:entry-point')\nList<String> _sankofaManifest() => <String>[%s];\n" % quoted
+body += "@pragma('dyn-module:entry-point')\nObject? _sankofaEntry() { final r = <Object?>[%s]; return r.length; }\n" % tearoffs
+open(out, 'w').write(body)
+PY
 "$AOTRT" "$DART2BC" --platform "$PLATFORM" --target vm --packages "$PKGCFG" \
   -Ddart.vm.product=true --import-dill "$WORK/base-noaot.dill" \
   --filesystem-root "$WORK" --filesystem-scheme dev-dart-app --validate "$DI" \
   --output "$WORK/patch.bytecode" --prefix-library-uris sankofa/patch \
-  "dev-dart-app:/data/$MODULE_SRC.dart"
+  "dev-dart-app:/data/_patch_full.dart"
 ls -la "$WORK/patch.bytecode"
 
-# Stage the DEVICE patch artifact = exactly what the engine boot hook
-# (DartIsolate::SankofaApplyBootPatch, SANKOFA_PATCH_DIR) reads on the iPhone:
-#   sankofa_patch.bytecode  + sankofa_patch.names (comma-separated changed set)
+# Stage the DEVICE patch artifact = the SINGLE self-contained file the engine
+# boot hook (DartIsolate::SankofaApplyBootPatch) reads via the updater's
+# sankofa_next_boot_patch_path(). Manifest is embedded (_sankofaManifest()).
 PATCH_OUT="$WORK/patch_out"; mkdir -p "$PATCH_OUT"
 cp "$WORK/patch.bytecode" "$PATCH_OUT/sankofa_patch.bytecode"
-printf '%s' "$FNS" > "$PATCH_OUT/sankofa_patch.names"
-echo "    device patch staged in $PATCH_OUT (SANKOFA_PATCH_DIR):"
+echo "    device patch staged (single self-contained file):"
 ls -la "$PATCH_OUT"
 
 echo "### 4. APPLY (NO JIT): transplant manifest targets, invoke $INVOKE() ###"
