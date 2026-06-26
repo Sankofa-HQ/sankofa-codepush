@@ -39,7 +39,7 @@ echo "### building base + patch AOT, analyzing (--shorebird) ###"
 build_aot "$BASE_SRC" base
 build_aot "$PATCH_SRC" patch
 
-python3 - "$WORK/base.json" "$WORK/patch.json" <<'PY'
+python3 - "$WORK/base.json" "$WORK/patch.json" "$WORK/changed_manifest.json" <<'PY'
 import json, sys
 base = json.load(open(sys.argv[1]))['functions']
 patch = json.load(open(sys.argv[2]))['functions']
@@ -59,4 +59,17 @@ for f in sorted(app_changed, key=lambda x: x['name']):
 other = len(changed) - len(app_changed)
 if other:
     print(f"  (+{other} private/SDK fns whose transitive hash shifted)")
+# Emit the patch manifest = the transplant target set the boot-time apply consumes
+# (load patch bytecode module, AttachBytecode each named fn onto the base fn).
+manifest = {
+    "schema": 1,
+    "link_pct": round(100.0*(len(patch)-len(changed))/len(patch), 2),
+    "changed_count": len(changed),
+    "transplant": [
+        {"name": f["name"], "subgraph_hash": f["subgraph_hash"]}
+        for f in changed
+    ],
+}
+json.dump(manifest, open(sys.argv[3], "w"), indent=2)
+print(f"\nwrote manifest -> {sys.argv[3]} ({len(changed)} transplant targets)")
 PY
