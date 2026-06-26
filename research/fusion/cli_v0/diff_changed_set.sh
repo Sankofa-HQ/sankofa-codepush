@@ -46,11 +46,13 @@ patch = json.load(open(sys.argv[2]))['functions']
 base_hashes = {f['subgraph_hash'] for f in base}
 # Changed = patch functions whose subgraph_hash is not present in base.
 changed = [f for f in patch if f['subgraph_hash'] not in base_hashes]
-# Drop SDK/runtime noise: report only app-named fns + count the rest.
+# Scope to the APP library: a bytecode-transplant patch only ever ships app
+# functions (SDK/platform code lives in the base engine, never patched), so SDK
+# hash drift across independent builds is irrelevant noise. Keep app-lib fns.
 def app(f):
-    n = f['name']
-    return not (n.startswith('_') or n in ('<stub>', '<unknown>', '[]', '[]=') )
+    return f.get('library_uri', '').startswith('dev-dart-app')
 app_changed = [f for f in changed if app(f)]
+changed = app_changed  # the manifest/link% are about the app patch set
 print(f"base fns={len(base)} patch fns={len(patch)} | total changed (ship as bytecode)={len(changed)}")
 print(f"link% by count = {100.0*(len(patch)-len(changed))/len(patch):.2f}%")
 print("--- app-named changed functions (the bytecode cascade set) ---")

@@ -27,9 +27,13 @@ PLATFORM="$OUT/vm_platform_product.dill"
 ANALYZE="$OUT/analyze_snapshot"
 WORK="${WORK:-/tmp/sankofa_cli_v0_loop}"
 DI="dev-dart-app:/data/di.yaml"
+# Parameterized: pick the demo via env (defaults = the compute string-change demo).
+BASE_SRC="${BASE_SRC:-base}"        # full base app
+PATCH_SRC="${PATCH_SRC:-patchA}"    # full patched app (for the diff)
+MODULE_SRC="${MODULE_SRC:-patch_module}"  # extracted changed-set module (bytecode)
+INVOKE="${INVOKE:-caller}"          # fn to invoke before/after
 rm -rf "$WORK"; mkdir -p "$WORK/data"
-cp "$HERE/data/base.dart" "$HERE/data/patchA.dart" "$HERE/data/patch_module.dart" \
-   "$HERE/data/di.yaml" "$WORK/data/"
+cp "$HERE"/data/*.dart "$HERE/data/di.yaml" "$WORK/data/"
 cd "$WORK"
 
 genk () {  # $1=src-basename $2=out.dill $3=aot|no-aot
@@ -42,22 +46,27 @@ analyze () {  # $1=tag.aot $2=tag.json
   "$ANALYZE" --shorebird --out="$WORK/$2" "$WORK/$1" >/dev/null 2>&1
 }
 
-echo "### 1+2. build base.aot, diff base vs patchA -> changed manifest ###"
-genk base base-aot.dill aot
+echo "### 1+2. build base.aot, diff $BASE_SRC vs $PATCH_SRC -> changed manifest ###"
+genk "$BASE_SRC" base-aot.dill aot
 "$GENSNAP" --snapshot_kind=app-aot-elf --elf="$WORK/base.aot" "$WORK/base-aot.dill" >/dev/null 2>&1
-genk patchA patch-aot.dill aot
+genk "$PATCH_SRC" patch-aot.dill aot
 "$GENSNAP" --snapshot_kind=app-aot-elf --elf="$WORK/patch.aot" "$WORK/patch-aot.dill" >/dev/null 2>&1
 analyze base.aot base.json
 analyze patch.aot patch.json
-genk base base-noaot.dill no-aot   # for dart2bytecode --import-dill
+genk "$BASE_SRC" base-noaot.dill no-aot   # for dart2bytecode --import-dill
 
 FNS=$(python3 - "$WORK/base.json" "$WORK/patch.json" "$WORK/changed_manifest.json" <<'PY'
 import json, sys
 base = json.load(open(sys.argv[1]))['functions']
 patch = json.load(open(sys.argv[2]))['functions']
 bh = {f['subgraph_hash'] for f in base}
-changed = [f for f in patch if f['subgraph_hash'] not in bh]
-json.dump({"transplant":[{"name":f["name"],"subgraph_hash":f["subgraph_hash"]} for f in changed]},
+# Scope to the APP library: our patch only ever transplants app functions as
+# bytecode (SDK/platform code is in the base engine, never patched), so SDK hash
+# drift across builds is irrelevant. Keep only app-library changed functions.
+def is_app(f): return f.get('library_uri','').startswith('dev-dart-app')
+changed = [f for f in patch if f['subgraph_hash'] not in bh and is_app(f)]
+json.dump({"transplant":[{"name":f["name"],"library_uri":f.get("library_uri",""),
+                          "subgraph_hash":f["subgraph_hash"]} for f in changed]},
           open(sys.argv[3],"w"), indent=2)
 names = []
 for f in changed:
@@ -74,10 +83,9 @@ echo "### 3. compile extracted changed-set module -> patch.bytecode ###"
   -Ddart.vm.product=true --import-dill "$WORK/base-noaot.dill" \
   --filesystem-root "$WORK" --filesystem-scheme dev-dart-app --validate "$DI" \
   --output "$WORK/patch.bytecode" --prefix-library-uris sankofa/patch \
-  "dev-dart-app:/data/patch_module.dart"
+  "dev-dart-app:/data/$MODULE_SRC.dart"
 ls -la "$WORK/patch.bytecode"
 
-echo "### 4. APPLY (NO JIT): transplant manifest targets, invoke caller() ###"
-echo "    expect: caller() => caller-> FIXED"
+echo "### 4. APPLY (NO JIT): transplant manifest targets, invoke $INVOKE() ###"
 "$ANALYZE" --bytecode_patch="$WORK/patch.bytecode" --patch_fns="$FNS" \
-  --patch_invoke=caller "$WORK/base.aot"
+  --patch_invoke="$INVOKE" "$WORK/base.aot"
