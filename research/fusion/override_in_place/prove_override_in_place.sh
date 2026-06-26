@@ -75,8 +75,10 @@ echo "### 2. no-AOT kernel (import-dill) ###"
   --dynamic-interface "dev-dart-app:/data/$TEST/dynamic_interface.yaml" \
   "dev-dart-app:/data/$TEST/main.dart"
 
-echo "### 3. base AOT snapshot ###"
-"$GENSNAP" --snapshot_kind=app-aot-elf --elf=base.aot main_aot.dill
+echo "### 3. base AOT snapshot (SANKOFA_NO_TABLE_DISPATCH=1 keeps instance calls"
+echo "###    switchable so an UNCHANGED base caller can reach a transplanted"
+echo "###    bytecode method = virtual entry-boundary proof, probe 3) ###"
+SANKOFA_NO_TABLE_DISPATCH=1 "$GENSNAP" --snapshot_kind=app-aot-elf --elf=base.aot main_aot.dill
 
 echo "### 4. patch -> BYTECODE (the downloaded crash-fix) ###"
 "$AOTRT" "$DART2BC" --platform "$PLATFORM" --target vm --packages "$PKGCFG" \

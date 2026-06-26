@@ -53,11 +53,36 @@
 > the ENTRY boundary where unchanged base-AOT code calls into the cascade: static
 > entry edge = DD (producer done) OR extend cascade to a fresh-dispatch point;
 > virtual entry edge (Flutter framework → your build()) = switchable calls + IC
-> flush (§A below). **Everything upstream is proven device-free: keep-bytecode,
-> merge consumer, fuse, analyzer link@99.6%, β.3 exec on device, AND now full
-> (static+virtual) cascade-interior rerouting.** Remaining = entry-boundary
-> mechanism + CLI cascade computation + engine-shell boot integration + iOS
-> device round-trip.
+> flush (§A below).
+>
+> **⭐⭐ 2026-06-26 — VIRTUAL ENTRY BOUNDARY now PROVEN device-free too (probe 3).**
+> The last open edge — an UNCHANGED base-AOT function reaching changed code — is
+> solved with NO per-function trampoline (which iOS can't generate). Two facts
+> unlocked it: (1) `FUNCTION_REG == R0` on arm64 = exactly what the InterpretCall
+> stub expects; (2) the switchable IC stubs (`MegamorphicCall`,
+> `ICCallThroughCode`) LOAD `FUNCTION_REG` from the resolved Function before
+> jumping to its `entry_point_` — so a bytecode target's InterpretCall stub gets
+> the Function for free. Only the *monomorphic direct call* path was broken (it
+> enters `MonomorphicEntryPoint` with `R0=receiver`, no `FUNCTION_REG`). Fix =
+> two base-engine changes (both NON-version-hash, iOS-viable, base-resident):
+> (a) `aot_call_specializer.cc TryReplaceWithDispatchTableCall` — env-gated
+> `SANKOFA_NO_TABLE_DISPATCH` keeps instance calls switchable instead of baked
+> dispatch-table calls; (b) `runtime_entry.cc DoICDataMissAOT` — skip the
+> monomorphic transition for `target_function.HasBytecode()` so bytecode targets
+> stay on the FUNCTION_REG-loading IC-through-code path. Result: probe 3
+> (`Widget.build` transplanted, `render` UNCHANGED) flipped `render-> BASE-UI` →
+> `render-> PATCH-UI-FIXED`. The Flutter framework→build() patch case works with
+> no trampoline, no runtime codegen, no executable patch memory. (Boot-time patch
+> application needs no IC flush — call sites are fresh before runApp; flush only
+> matters for hot-apply-while-running, a later enhancement.) **ALL FOUR rerouting
+> paths now proven device-free: direct fresh dispatch, static cascade, virtual
+> cascade-interior, AND virtual entry boundary.**
+>
+> **Everything upstream is proven device-free: keep-bytecode, merge consumer,
+> fuse, analyzer link@99.6%, β.3 exec on device, full cascade rerouting, AND the
+> virtual entry boundary.** Remaining is pure integration: CLI (changed-set +
+> caller cascade → bytecode module), engine-shell boot integration (load +
+> transplant + base built w/ the two flags), iOS rebuild, on-device round-trip.
 
 Status as of 2026-06-25. This is the engineering plan for the LAST architectural
 piece of arbitrary-logic (crash-fix / large-update) iOS code-push. Everything
