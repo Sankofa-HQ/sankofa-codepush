@@ -1,5 +1,36 @@
 # Sankofa CodePush iOS — arbitrary-logic rerouting design (DD layer)
 
+> ⛔ **SUPERSEDED (2026-06-26) — the "hybrid snapshot / serializer carries
+> bytecode" build step below is a DEAD END. Active plan:
+> [`../IOS_DATA_ONLY_PORT_PLAN.md`](../IOS_DATA_ONLY_PORT_PLAN.md).**
+>
+> The FUSION-vs-override decision still stands (we are NOT re-litigating that —
+> override-in-place can't reroute monomorphic/dispatch calls). What's superseded
+> is the *delivery sub-mechanism*: baking changed-function bytecode into the AOT
+> snapshot via a new serialization cluster (build step 1 below).
+>
+> **Why it's a dead end (confirmed at the wall, 2026-06-26):** the AOT snapshot
+> format deliberately carries NO bytecode. `FunctionSerializationCluster` in
+> `kFullAOT` writes only `code()` (the bytecode slot is JIT-only) and there is
+> no Bytecode cluster. A `Bytecode` object owns an `object_pool` (a deep graph
+> resolving to functions/classes/constants), a `binary` blob, exception
+> handlers, and pc/var descriptors — Dart never serializes it; it is rebuilt at
+> runtime by `BytecodeLoader` from `binary`. Baking the constructed object +
+> pool into the snapshot fights the framework. (I got `hybrid.aot` to *build*
+> after fixing the precompiler keep-bytecode + a `ProgramVisitor::Dedup` RO-stub
+> write-fault, but it carries no bytecode and faults in `ReadDispatchTable`.)
+>
+> **The proven alternative achieves the SAME fusion without serialization:**
+> `Dart_CreateIsolateGroupWithBaseSnapshot` composes base+patch at isolate
+> creation; unchanged code runs base AOT, changed code runs via the β.3
+> interpreter (`Interpreter::Run`) — already proven on iPhone 14 Pro AND
+> Galaxy A14. The data-only LINK works from a deterministic analyzer hash alone
+> (100% identical-source, 99.6% one-leaf-change), so neither the serializer
+> cluster NOR precompiler offset-alignment is needed. See the port plan.
+>
+> Build log below is retained for the proven primitives (the fuse, no-JIT exec,
+> the rerouting call-kind table) and the dead-end findings.
+
 Status as of 2026-06-25. This is the engineering plan for the LAST architectural
 piece of arbitrary-logic (crash-fix / large-update) iOS code-push. Everything
 upstream of it is proven device-free in our own engine.
