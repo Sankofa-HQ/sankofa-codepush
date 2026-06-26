@@ -323,6 +323,31 @@ pass 1 emit identity + compute table + slot mapping; pass 2 gen_snapshot with
   integration Shorebird did in their private dart-sdk; bytecode attachment is
   solved, the precompiler function-lifecycle (dedup/clear/duplicate) is the
   remaining fiddly surface.
+- **2026-06-26 — PRECOMPILER INTEGRATION DONE; bytecode survives to serialization.**
+  Resolved last turn's two blockers + got the bytecode all the way through the
+  precompiler:
+  - Attach to the CANONICAL function via inline ReadCode in the redirect (library
+    lookup for toplevel, class lookup for methods) — avoids the lazy-load
+    dict-vs-functions() divergence.
+  - `class_finalizer.cc:1299` VisitFunction cleared EVERY function's code+ic_data
+    during finalization (wiping bytecode) → guarded `if (HasBytecode) return`.
+    (THIS was the bytecode-clear path; line-888 guard alone was insufficient.)
+  - `Precompiler::ProcessFunction` (865) `RELEASE_ASSERT(!HasCode)` fired for
+    bytecode fns (Code=InterpretCall stub) → added `if (HasBytecode) return` at
+    the top (skip AOT processing; bytecode callees reference existing base fns).
+  - `Precompiler::CompileFunction` skip on HasBytecode (done earlier).
+  Now `[sankofa-skip] keep-bytecode` fires for the merged fns and they reach the
+  serializer. **NEW WALL (expected): serializer crash** — lldb:
+  `UntaggedObject::StorePointer<InstructionsPtr>` (EXC_BAD_ACCESS) while
+  serializing a bytecode function's Code (the InterpretCall stub) / instructions.
+  The AOT snapshot serializer has no handling for bytecode functions (Code=stub +
+  the attached Bytecode object). NEXT: serializer/deserializer support —
+  (a) serialize the function's Bytecode object (add a Bytecode serialization
+  cluster in app_snapshot.cc, model on kCodeCid:7802) and (b) make the
+  Code/Instructions clustering tolerate a bytecode fn's InterpretCall-stub Code
+  (or serialize bytecode fns without trying to relocate AOT instructions). This
+  is the deep serializer surgery (the part Shorebird did in their private
+  dart-sdk). Engine-tree WIP gated; [sankofa-*] diagnostics still in.
 - **NEXT STEP (exact):** in `Precompiler::CompileFunction` (precompiler.cc:3660),
   for a function in the "changed set", attach its bytecode + set
   `is_declared_in_bytecode` + `SetInstructions(StubCode::InterpretCall())` and
