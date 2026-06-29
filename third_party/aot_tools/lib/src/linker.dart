@@ -34,7 +34,11 @@ class LinkTable {
   ///   [ count : uint32 BE ]
   ///   [ [ sim_offset : uint32 BE ][ cpu_offset : uint32 BE ] × count ]
   ///   [ zero padding → next `padToAlignment`-byte boundary ]
-  Uint8List toBytes({int padToAlignment = 4096}) {
+  // padToAlignment defaults to 16384 (16 KB): iOS arm64 devices use 16 KB
+  // pages, and Dart_LoadELF mmaps the embedded ELF at this offset — a 4 KB-only
+  // alignment makes the load fail with "File offset must be page-aligned" on
+  // device. 16 KB is a multiple of 4 KB, so it is also valid on 4 KB-page hosts.
+  Uint8List toBytes({int padToAlignment = 16384}) {
     final builder = BytesBuilder(copy: false);
     void addU32BE(int v) {
       if (v < 0 || v > 0xFFFFFFFF) {

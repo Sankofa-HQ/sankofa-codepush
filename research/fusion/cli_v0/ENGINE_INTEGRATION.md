@@ -17,11 +17,14 @@ wired into the **real updater pipeline** (no env-var shortcut).
    failures log + never abort.
 
 2. **Virtual entry-boundary rerouting** (Flutter framework → your `build()`):
-   - `runtime/vm/compiler/aot/aot_call_specializer.cc` — `SANKOFA_NO_TABLE_DISPATCH`
-     keeps instance calls switchable (not baked dispatch-table calls).
-   - `runtime/vm/runtime_entry.cc` `DoICDataMissAOT` — bytecode targets skip the
-     monomorphic fast-path (no FUNCTION_REG) and stay on IC-through-code (loads
-     FUNCTION_REG = what InterpretCall needs).
+   - 🛑 **SUPERSEDED (2026-06-29 device finding).** `SANKOFA_NO_TABLE_DISPATCH`
+     SIGSEGVs the real Flutter framework at startup (base boot, no patch) — see
+     `../REROUTING_DESIGN.md` top. The flag is NOT a viable solution. The
+     replacement is base-resident, base-build-time dispatch indirection that
+     loads FUNCTION_REG (so a dispatch slot can point at an interpret trampoline)
+     — executable in the signed app, no runtime codegen. NOT YET BUILT.
+   - `runtime/vm/runtime_entry.cc` `DoICDataMissAOT` HasBytecode-skip remains a
+     correct fix for the monomorphic case, but is insufficient alone.
 
 3. **Transplant primitive** — `dart_api_impl.cc` `Dart_SankofaTransplantBytecode`.
 
@@ -58,8 +61,11 @@ A vendoring script should refresh both from the updater crate.
    startup, like Shorebird's `ConfigureShorebird`) + the Shell success call.
 2. **Build the iOS engine** (`ios_release`) with these edits (local M2;
    needs the Metal Toolchain: `xcodebuild -downloadComponent MetalToolchain`).
-3. **Build a demo app's AOT** with the Sankofa gen_snapshot and
-   `SANKOFA_NO_TABLE_DISPATCH=1` (so instance calls are switchable).
+3. **Build a demo app's AOT** with the Sankofa gen_snapshot. 🛑 Do NOT pass
+   `SANKOFA_NO_TABLE_DISPATCH=1` — it SIGSEGVs the framework at startup
+   (2026-06-29 device finding). Build the demo so the patched call path is
+   reached via a fresh-dispatch / closure root (cascade-as-bytecode), OR wait for
+   the base-resident virtual-entry mechanism.
 4. **Baseline**: run unpatched → observe the crash.
 5. `make_and_apply_patch.sh` → upload the signed patch → the updater downloads +
    stages it → relaunch.

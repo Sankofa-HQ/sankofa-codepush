@@ -100,26 +100,43 @@ class SnapshotData {
 
   /// Are the VM sections of `a` and `b` compatible for patching?
   ///
-  /// We require: equal segment lengths AND equal `dart_version` /
-  /// `snapshot_version` strings. We deliberately do NOT compare the
-  /// 64-bit content hashes — our analyzer's hash includes some
-  /// non-deterministic bits (object pool fingerprints, image-header
-  /// padding) that vary between identical-source rebuilds. Until the
-  /// hash is fully deterministic (v1 punch list), this length+version
-  /// check is the strongest invariant we can enforce; it still rejects
-  /// cross-Flutter-version patches (the primary failure mode).
+  /// We require: equal segment lengths, equal `dart_version`, AND equal
+  /// *VM-instructions* content hash. The VM snapshot is the core Dart
+  /// runtime stubs — it is identical across all builds of a given Dart
+  /// version and independent of the app's source, so its hash is the
+  /// correct cross-version compatibility invariant (it rejects
+  /// cross-Flutter-version patches, the primary failure mode, while
+  /// allowing same-version patches that legitimately change app code).
+  ///
+  /// We deliberately do NOT compare `snapshot_version`: our analyzer
+  /// emits it from the ELF **build-id**, which folds in app content and
+  /// therefore differs between a base and any genuinely-changed patch —
+  /// comparing it for equality would reject every real patch. (The
+  /// build-id is a mislabelled "format version"; the VM-instructions
+  /// hash above is the app-independent signal it was meant to be.)
   static bool areVmSectionsEqual(SnapshotData a, SnapshotData b) {
+    // [sankofa] DIAGNOSTIC ONLY: force-accept to produce a stageable .vmcode for
+    // the on-device fusion trace, even when the VM sections are incompatible
+    // (e.g. assembly base vs ELF patch). NEVER set this for a real patch — the
+    // resulting .vmcode crashes at fused-isolate deserialization.
+    if (Platform.environment['SANKOFA_FORCE_LINK'] != null) return true;
     if (a.vmDataLength != b.vmDataLength) return false;
     if (a.adjustedVmInstructionsLength != b.adjustedVmInstructionsLength) {
       return false;
     }
     if (a.dartVersion != b.dartVersion) return false;
-    // snapshot_version was added in a later analyze_snapshot revision;
-    // tolerate one side being null so older base releases stay
-    // patchable from a current build.
-    if (a.snapshotVersion != null &&
-        b.snapshotVersion != null &&
-        a.snapshotVersion != b.snapshotVersion) {
+    // Compare the VM-instructions content hash. This is the correct
+    // compatibility gate: the fusion runs the patch's isolate code against the
+    // BASE's VM snapshot, so the two VM images must be byte-identical or the
+    // patch's VM-stub references are wrong at runtime. On 2026-06-28 a relaxed
+    // (length-only) variant let an iOS `app-aot-assembly` base + `app-aot-elf`
+    // patch link despite differing VM bytes — the fused isolate CRASHED on the
+    // iPhone (boot 2, no fusion_result written → died in deserialization). So:
+    // a hash mismatch is a REAL incompatibility, not a benign backend artifact.
+    // The iOS fix is to build the patch sharing the base's VM (linked build /
+    // matching backend), NOT to weaken this check. (Build-id `snapshot_version`
+    // is app-dependent and unusable here — see git history.)
+    if (a.adjustedVmInstructionsHash != b.adjustedVmInstructionsHash) {
       return false;
     }
     return true;

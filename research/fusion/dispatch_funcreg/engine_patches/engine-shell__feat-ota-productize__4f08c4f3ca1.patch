@@ -1,0 +1,442 @@
+From 4f08c4f3ca14fd8785663a5a4d01a05f542e2b2d Mon Sep 17 00:00:00 2001
+From: Sankofa <dev@sankofa.dev>
+Date: Mon, 29 Jun 2026 23:22:46 +0000
+Subject: [PATCH] boot hook: parse target=source String manifest + dispatch
+ repoint (dispatch-funcreg)
+
+SankofaApplyBootPatch (dart_isolate.cc) now:
+- reads _sankofaManifest() as a comma-separated String of "target=source" pairs
+  (a String, not a List -> the patch carries no _GrowableList, which a slim AOT
+  app tree-shakes out and the interpreter can't resolve)
+- transplants each base target <- patch source (mapped names; a top-level source
+  fn with a constant-return body has no class -> no Object. ctor, so the patch
+  references zero base-SDK callables and loads on any slim AOT app)
+- captures the target's code entry before transplant and repoints its
+  dispatch-table slots to the SankofaDispatchInterpret trampoline + sets the
+  function-half (Dart_SankofaCodeEntryForName / Dart_SankofaRepointDispatchToInterpret)
+- records repointed= count in sankofa_boot_result.txt
+
+Proven on iPhone 14 Pro: transplanted=2 repointed=2 verify=render-> PATCH-UI-FIXED,
+clean boot, from a downloaded bytecode patch -- no flag, no JIT.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ engine/src/flutter/runtime/BUILD.gn           |  13 +
+ engine/src/flutter/runtime/dart_isolate.cc    | 283 ++++++++++++++++--
+ .../framework/Source/FlutterDartProject.mm    |  16 +
+ 3 files changed, 290 insertions(+), 22 deletions(-)
+
+diff --git a/engine/src/flutter/runtime/BUILD.gn b/engine/src/flutter/runtime/BUILD.gn
+index 2f7aea3d0d1..cbe1705ec1a 100644
+--- a/engine/src/flutter/runtime/BUILD.gn
++++ b/engine/src/flutter/runtime/BUILD.gn
+@@ -5,6 +5,12 @@
+ import("//flutter/common/config.gni")
+ import("//flutter/testing/testing.gni")
+ 
++# [sankofa] The dart VM defines DART_DYNAMIC_MODULES for itself but does not
++# propagate it to embedders. dart_isolate.cc's boot-time code-push hook
++# (SankofaApplyBootPatch) is guarded by it, so import the arg and mirror the
++# define on the "runtime" source_set below.
++import("//flutter/third_party/dart/runtime/runtime_args.gni")
++
+ source_set("test_font") {
+   sources = [
+     "test_font_data.cc",
+@@ -102,6 +108,13 @@ source_set("runtime") {
+ 
+   public_configs = [ "//flutter:config" ]
+ 
++  # [sankofa] Compile the SankofaApplyBootPatch boot-time code-push hook in
++  # dart_isolate.cc (guarded by DART_DYNAMIC_MODULES). The dart VM sets this for
++  # itself; mirror it here so the embedder hook is not a no-op.
++  if (dart_dynamic_modules) {
++    defines = [ "DART_DYNAMIC_MODULES" ]
++  }
++
+   deps = [
+     ":dart_plugin_registrant",
+     ":test_font",
+diff --git a/engine/src/flutter/runtime/dart_isolate.cc b/engine/src/flutter/runtime/dart_isolate.cc
+index 7701258d5dd..309b78103fb 100644
+--- a/engine/src/flutter/runtime/dart_isolate.cc
++++ b/engine/src/flutter/runtime/dart_isolate.cc
+@@ -4,7 +4,9 @@
+ 
+ #include "flutter/runtime/dart_isolate.h"
+ 
++#include <cstdio>
+ #include <cstdlib>
++#include <cstring>
+ #include <utility>
+ 
+ #include "flutter/fml/logging.h"
+@@ -24,9 +26,11 @@
+ #include "fml/message_loop_task_queues.h"
+ #include "fml/task_source.h"
+ #include "fml/time/time_point.h"
++#include "third_party/dart/runtime/include/analyze_snapshot_api.h"
+ #include "third_party/dart/runtime/include/bin/native_assets_api.h"
+ #include "third_party/dart/runtime/include/dart_api.h"
+ #include "third_party/dart/runtime/include/dart_tools_api.h"
++#include "third_party/dart/runtime/bin/elf_loader.h"
+ #include "third_party/tonic/converter/dart_converter.h"
+ #include "third_party/tonic/dart_class_library.h"
+ #include "third_party/tonic/dart_class_provider.h"
+@@ -195,6 +199,12 @@ void DartIsolate::SpawnIsolateShutdownCallback(
+   DartIsolate::DartIsolateShutdownCallback(isolate_group_data, isolate_data);
+ }
+ 
++// [sankofa] Forward decls — defined below alongside the boot-patch-path helpers.
++// Detects + loads a staged data-only fusion (.vmcode) patch for the root isolate.
++static bool SankofaTryLoadFusionPatch(const uint8_t** patch_data,
++                                      const uint8_t** patch_instr);
++static void SankofaFusionTrace(const char* msg);
++
+ std::weak_ptr<DartIsolate> DartIsolate::CreateRootIsolate(
+     const Settings& settings,
+     fml::RefPtr<const DartSnapshot> isolate_snapshot,
+@@ -262,6 +272,33 @@ std::weak_ptr<DartIsolate> DartIsolate::CreateRootIsolate(
+                            isolate_group_data,
+                        std::shared_ptr<DartIsolate>* isolate_data,
+                        Dart_IsolateFlags* flags, char** error) {
++      // [sankofa] Data-only FUSION boot: if a .vmcode patch is staged, create
++      // the group from the PATCH snapshot fused onto the running base App — the
++      // EntryPointAt resolver routes unchanged Codes to the base image and
++      // changed Codes to the patch (interpreted on iOS), keyed by the link
++      // table. Falls through to the normal path for no-patch / transplant-patch.
++      const uint8_t* patch_data = nullptr;
++      const uint8_t* patch_instr = nullptr;
++      if (SankofaTryLoadFusionPatch(&patch_data, &patch_instr)) {
++        Dart_Isolate iso = Dart_CreateIsolateGroupWithBaseSnapshot(
++            (*isolate_group_data)->GetAdvisoryScriptURI().c_str(),
++            (*isolate_group_data)->GetAdvisoryScriptEntrypoint().c_str(),
++            /*snapshot_data=*/patch_data,
++            /*snapshot_instructions=*/patch_instr,
++            /*base_snapshot_data=*/
++            (*isolate_group_data)->GetIsolateSnapshot()->GetDataMapping(),
++            /*base_snapshot_instructions=*/
++            (*isolate_group_data)
++                ->GetIsolateSnapshot()
++                ->GetInstructionsMapping(),
++            flags, isolate_group_data, isolate_data, error);
++        char b[200];
++        ::snprintf(b, sizeof(b), "4_create returned iso=%p err=%s",
++                   reinterpret_cast<void*>(iso),
++                   (error && *error) ? *error : "(none)");
++        SankofaFusionTrace(b);
++        return iso;
++      }
+       return Dart_CreateIsolateGroup(
+           (*isolate_group_data)->GetAdvisoryScriptURI().c_str(),
+           (*isolate_group_data)->GetAdvisoryScriptEntrypoint().c_str(),
+@@ -925,6 +962,115 @@ void SetSankofaBootPatchPath(const std::string& path) {
+   *g_sankofa_boot_patch_path = path;
+ }
+ 
++// [sankofa] Set when the root isolate was created via the DATA-ONLY FUSION path
++// (Dart_CreateIsolateGroupWithBaseSnapshot) rather than the simple transplant
++// boot hook. In fusion mode the staged patch IS the isolate snapshot (a .vmcode
++// = LinkTable + patch AOT ELF): unchanged Codes resolve to the running base App
++// image and changed Codes to the patch image (run via the interpreter on iOS).
++// There is no bytecode module to transplant, so SankofaApplyBootPatch instead
++// records the resolver stats. This is the on-device counterpart of the
++// host-proven `analyze_snapshot --fusion_selftest` (research/fusion).
++static bool g_sankofa_fusion_active = false;
++
++// [sankofa] Append a progress marker next to the staged patch so the fusion boot
++// path is traceable even when it crashes (device log tooling is unavailable over
++// the CoreDevice transport). Pull {patchdir}/sankofa_fusion_trace.txt off-device.
++static void SankofaFusionTrace(const char* msg) {
++  if (g_sankofa_boot_patch_path == nullptr ||
++      g_sankofa_boot_patch_path->empty()) {
++    return;
++  }
++  const std::string& p = *g_sankofa_boot_patch_path;
++  auto slash = p.find_last_of('/');
++  if (slash == std::string::npos) return;
++  std::string out = p.substr(0, slash) + "/sankofa_fusion_trace.txt";
++  if (FILE* f = ::fopen(out.c_str(), "a")) {
++    ::fprintf(f, "%s\n", msg);
++    ::fclose(f);
++  }
++}
++
++// [sankofa] Detect + load a staged data-only FUSION patch (.vmcode). A .vmcode
++// is [u32 count BE][(sim,cpu)×count][pad→4096][ELF]; a transplant patch is a
++// bytecode module (no leading link table → ELF magic check fails, so it falls
++// through to the transplant hook). On a confirmed .vmcode: parse the link header
++// (populates the resolver's sim→cpu table) and Dart_LoadELF the embedded patch
++// snapshot READ-ONLY (no PROT_EXEC on iOS). Returns true + the patch isolate
++// data/instructions mappings to fuse onto the base.
++static bool SankofaTryLoadFusionPatch(const uint8_t** patch_data,
++                                      const uint8_t** patch_instr) {
++  if (g_sankofa_boot_patch_path == nullptr ||
++      g_sankofa_boot_patch_path->empty()) {
++    return false;
++  }
++  auto m = fml::FileMapping::CreateReadOnly(*g_sankofa_boot_patch_path);
++  if (m == nullptr || m->GetSize() < 8) {
++    return false;
++  }
++  const uint8_t* p = m->GetMapping();
++  const int64_t size = static_cast<int64_t>(m->GetSize());
++  // Link-table header: count (u32 BE) then count*(sim,cpu) pairs, padded to 4096.
++  const uint32_t count = (static_cast<uint32_t>(p[0]) << 24) |
++                         (static_cast<uint32_t>(p[1]) << 16) |
++                         (static_cast<uint32_t>(p[2]) << 8) |
++                         static_cast<uint32_t>(p[3]);
++  const int64_t table_bytes = 4 + static_cast<int64_t>(count) * 8;
++  if (table_bytes > size) {
++    return false;  // not a (valid) .vmcode → transplant path handles it
++  }
++  // 16384-align: matches LinkTable.toBytes padToAlignment=16384. iOS arm64 uses
++  // 16 KB pages; Dart_LoadELF mmaps the embedded ELF at this offset.
++  const int64_t elf_off = (table_bytes + 16383) & ~static_cast<int64_t>(16383);
++  if (elf_off + 4 > size) {
++    return false;
++  }
++  // ELF magic (0x7F 'E' 'L' 'F') at the padded offset confirms a fusion vmcode.
++  if (!(p[elf_off] == 0x7F && p[elf_off + 1] == 'E' && p[elf_off + 2] == 'L' &&
++        p[elf_off + 3] == 'F')) {
++    return false;
++  }
++  {
++    char b[160];
++    ::snprintf(b, sizeof(b), "1_detect count=%u elf_off=%lld size=%lld",
++               count, static_cast<long long>(elf_off),
++               static_cast<long long>(size));
++    SankofaFusionTrace(b);
++  }
++  // Confirmed fusion patch. Parse the link header into the resolver's table.
++  const intptr_t eoff = dart::snapshot_analyzer::Dart_SankofaReadLinkHeader(
++      p, static_cast<intptr_t>(size));
++  if (eoff < 0) {
++    SankofaFusionTrace("2_header FAILED");
++    FML_LOG(ERROR) << "[sankofa] fusion link header invalid";
++    return false;
++  }
++  SankofaFusionTrace("2_header ok");
++  // Load the embedded patch snapshot. READ-ONLY: on no-JIT iOS the patch's
++  // native instructions cannot be PROT_EXEC-mapped; they are never executed
++  // (unchanged → base App, changed → interpreter).
++  Dart_SankofaSetElfForceReadOnly(true);
++  const char* err = nullptr;
++  const uint8_t *pvd = nullptr, *pvi = nullptr;
++  Dart_LoadedElf* elf =
++      Dart_LoadELF(g_sankofa_boot_patch_path->c_str(),
++                   static_cast<uint64_t>(eoff), &err, &pvd, &pvi, patch_data,
++                   patch_instr);
++  Dart_SankofaSetElfForceReadOnly(false);
++  if (elf == nullptr) {
++    char b[200];
++    ::snprintf(b, sizeof(b), "3_loadelf FAILED: %s", err ? err : "(null)");
++    SankofaFusionTrace(b);
++    FML_LOG(ERROR) << "[sankofa] fusion patch ELF load failed: "
++                   << (err ? err : "(null)");
++    return false;
++  }
++  g_sankofa_fusion_active = true;
++  SankofaFusionTrace("3_loadelf ok -> calling CreateIsolateGroupWithBaseSnapshot");
++  FML_LOG(INFO) << "[sankofa] fusion patch loaded: link_count=" << count
++                << " elf_offset=" << eoff;
++  return true;
++}
++
+ // [sankofa] Boot-time code-push apply. Before main() runs, if the updater staged
+ // a patch, load its bytecode module and AttachBytecode each function named by
+ // the module's own embedded _sankofaManifest() onto the base app function. The
+@@ -940,6 +1086,32 @@ void SetSankofaBootPatchPath(const std::string& path) {
+ // download/Ed25519-verify/version-select/rollback. Failures log + never abort.
+ static void SankofaApplyBootPatch(Dart_Handle root_library) {
+ #if defined(DART_DYNAMIC_MODULES)
++  // [sankofa] Data-only FUSION boot: the patch was already fused at isolate
++  // creation (Dart_CreateIsolateGroupWithBaseSnapshot); there is no bytecode
++  // module to transplant. Record the resolver stats (how many Codes resolved to
++  // the base App image vs the patch image) so the outcome is observable without
++  // a live log, then return. This is the on-device counterpart of the
++  // host-proven `analyze_snapshot --fusion_selftest` resolver stats.
++  if (g_sankofa_fusion_active) {
++    intptr_t base_hits = 0, patch_hits = 0;
++    dart::snapshot_analyzer::Dart_SankofaResolverStats(&base_hits, &patch_hits);
++    FML_LOG(INFO) << "[sankofa] fusion boot: base_hits=" << base_hits
++                  << " patch_hits=" << patch_hits;
++    if (g_sankofa_boot_patch_path != nullptr &&
++        !g_sankofa_boot_patch_path->empty()) {
++      const std::string& p = *g_sankofa_boot_patch_path;
++      auto slash = p.find_last_of('/');
++      if (slash != std::string::npos) {
++        std::string out_path = p.substr(0, slash) + "/sankofa_fusion_result.txt";
++        if (FILE* f = ::fopen(out_path.c_str(), "w")) {
++          ::fprintf(f, "fusion base_hits=%ld patch_hits=%ld\n",
++                    static_cast<long>(base_hits), static_cast<long>(patch_hits));
++          ::fclose(f);
++        }
++      }
++    }
++    return;
++  }
+   if (g_sankofa_boot_patch_path == nullptr ||
+       g_sankofa_boot_patch_path->empty()) {
+     return;  // No staged patch — boot the base release.
+@@ -966,41 +1138,108 @@ static void SankofaApplyBootPatch(Dart_Handle root_library) {
+     return;
+   }
+ 
+-  // The manifest rides inside the patch: _sankofaManifest() -> List<String> of
+-  // the app-scoped changed-set function names (emitted by the CLI). Transplant
+-  // each: base root_library[name] <- patch plib[name].
++  // The manifest rides inside the patch: _sankofaManifest() -> a comma-separated
++  // STRING of "target" or "target=source" pairs (a String, NOT a List, so the
++  // patch carries no _GrowableList — which a slim AOT base tree-shakes out).
++  // For each: transplant base root_library[target] <- patch plib[source] and
++  // repoint target's dispatch-table slots. The SOURCE is typically a TOP-LEVEL
++  // patch fn (no class -> no Object. ctor) so the bytecode references zero
++  // base-SDK callables and loads against any slim AOT app; the TARGET is the
++  // app's (possibly virtual) method.
+   Dart_Handle manifest = Dart_Invoke(
+       plib, Dart_NewStringFromCString("_sankofaManifest"), 0, nullptr);
+-  if (tonic::CheckAndHandleError(manifest) || !Dart_IsList(manifest)) {
+-    FML_LOG(ERROR) << "[sankofa] patch manifest (_sankofaManifest) missing";
++  if (tonic::CheckAndHandleError(manifest) || !Dart_IsString(manifest)) {
++    FML_LOG(ERROR) << "[sankofa] patch manifest (_sankofaManifest String) "
++                      "missing";
+     return;
+   }
+-  intptr_t len = 0;
+-  if (tonic::CheckAndHandleError(Dart_ListLength(manifest, &len))) {
+-    return;
+-  }
+-  int ok = 0, fail = 0;
+-  for (intptr_t i = 0; i < len; i++) {
+-    Dart_Handle entry = Dart_ListGetAt(manifest, i);
+-    if (Dart_IsError(entry) || !Dart_IsString(entry)) {
+-      fail++;
+-      continue;
++  const char* manifest_cstr = nullptr;
++  Dart_StringToCString(manifest, &manifest_cstr);
++  int ok = 0, fail = 0, repointed_total = 0;
++  char* names = ::strdup(manifest_cstr);
++  for (char* tok = ::strtok(names, ","); tok != nullptr;
++       tok = ::strtok(nullptr, ",")) {
++    // "target=source", or "name" for same-name transplant.
++    char* target = tok;
++    const char* source = tok;
++    char* eq = ::strchr(tok, '=');
++    if (eq != nullptr) {
++      *eq = '\0';
++      source = eq + 1;
+     }
+-    const char* name = nullptr;
+-    Dart_StringToCString(entry, &name);
+-    Dart_Handle nh = Dart_NewStringFromCString(name);
+-    Dart_Handle tr =
+-        Dart_SankofaTransplantBytecode(root_library, nh, plib, nh);
++    // Sankofa dispatch-funcreg: capture the target's current code entry BEFORE
++    // transplant. A virtual method's dispatch-table slots hold this entry.
++    uintptr_t old_entry =
++        dart::snapshot_analyzer::Dart_SankofaCodeEntryForName(target);
++    Dart_Handle tr = Dart_SankofaTransplantBytecode(
++        root_library, Dart_NewStringFromCString(target), plib,
++        Dart_NewStringFromCString(source));
+     if (Dart_IsError(tr)) {
+-      FML_LOG(ERROR) << "[sankofa] transplant " << name << ": "
+-                     << Dart_GetError(tr);
++      FML_LOG(ERROR) << "[sankofa] transplant " << target << "<-" << source
++                     << ": " << Dart_GetError(tr);
+       fail++;
+     } else {
+       ok++;
++      // Reroute target's dispatch-table slots to the SankofaDispatchInterpret
++      // trampoline, so an UNCHANGED base-AOT virtual call (e.g. Flutter
++      // framework -> your build()) reaches the patched interpreted body. No-op
++      // (0 slots) for non-virtual/top-level targets. No flag, no JIT.
++      if (old_entry != 0) {
++        intptr_t np =
++            dart::snapshot_analyzer::Dart_SankofaRepointDispatchToInterpret(
++                target, old_entry);
++        if (np > 0) {
++          repointed_total += static_cast<int>(np);
++          FML_LOG(INFO) << "[sankofa] dispatch repoint " << target << ": " << np
++                        << " slot(s)";
++        }
++      }
+     }
+   }
++  ::free(names);
+   FML_LOG(INFO) << "[sankofa] boot code-push applied: " << ok
+                 << " transplanted, " << fail << " failed";
++
++  // Optional post-apply self-verification: if the root library defines a
++  // top-level `sankofaVerify()`, invoke it FRESH now (before main). Because we
++  // invoke it via Dart_Invoke after transplant, the call — and every static
++  // call it makes into the cascade of transplanted functions — dispatches
++  // through the interpreter to the PATCHED bodies (no JIT). Its String result
++  // is logged so a crash-fix is observable on-device. A throw here means the
++  // patch did not take; it is logged but does not block boot.
++  std::string verify_result;
++  if (ok > 0) {
++    Dart_Handle vr =
++        Dart_Invoke(root_library,
++                    Dart_NewStringFromCString("sankofaVerify"), 0, nullptr);
++    if (Dart_IsError(vr)) {
++      // Likely "method not found" (no verify hook) — benign — or a genuine
++      // post-apply throw. Log either way.
++      verify_result = std::string("ERROR: ") + Dart_GetError(vr);
++      FML_LOG(INFO) << "[sankofa] verify: " << Dart_GetError(vr);
++    } else if (Dart_IsString(vr)) {
++      const char* vs = nullptr;
++      Dart_StringToCString(vr, &vs);
++      verify_result = vs ? vs : "(null)";
++      FML_LOG(INFO) << "[sankofa] verify => " << verify_result;
++    }
++  }
++
++  // Write a transport-resilient result file next to the patch so the outcome
++  // is observable without a live log stream (pull via the app data container).
++  {
++    const std::string& p = *g_sankofa_boot_patch_path;
++    auto slash = p.find_last_of('/');
++    if (slash != std::string::npos) {
++      std::string out_path = p.substr(0, slash) + "/sankofa_boot_result.txt";
++      if (FILE* f = ::fopen(out_path.c_str(), "w")) {
++        ::fprintf(f, "transplanted=%d failed=%d repointed=%d verify=%s\n", ok,
++                  fail, repointed_total,
++                  verify_result.empty() ? "(none)" : verify_result.c_str());
++        ::fclose(f);
++      }
++    }
++  }
+ #endif  // defined(DART_DYNAMIC_MODULES)
+ }
+ 
+diff --git a/engine/src/flutter/shell/platform/darwin/ios/framework/Source/FlutterDartProject.mm b/engine/src/flutter/shell/platform/darwin/ios/framework/Source/FlutterDartProject.mm
+index 7ef2b24ac1c..594a04322da 100644
+--- a/engine/src/flutter/shell/platform/darwin/ios/framework/Source/FlutterDartProject.mm
++++ b/engine/src/flutter/shell/platform/darwin/ios/framework/Source/FlutterDartProject.mm
+@@ -175,6 +175,22 @@ static BOOL DoesHardwareSupportWideGamut() {
+     // no JIT) just before main(). This is the arbitrary-logic path, distinct
+     // from the whole-libapp application_library_paths override above.
+     NSString* sankofaYamlPath = [mainBundle pathForResource:@"sankofa" ofType:@"yaml"];
++    if (sankofaYamlPath.length == 0) {
++      // sankofa.yaml ships as a Flutter ASSET (the SDK contract:
++      // rootBundle.loadString('sankofa.yaml')), so it lives under
++      // App.framework/flutter_assets/, not at the bundle root. Fall back to
++      // that location so the code-push pipeline activates without requiring
++      // apps to also add it to "Copy Bundle Resources".
++      NSString* appFrameworkPath = [mainBundle pathForResource:@"Frameworks/App.framework"
++                                                        ofType:@""];
++      if (appFrameworkPath.length > 0) {
++        NSString* candidate =
++            [appFrameworkPath stringByAppendingPathComponent:@"flutter_assets/sankofa.yaml"];
++        if ([[NSFileManager defaultManager] fileExistsAtPath:candidate]) {
++          sankofaYamlPath = candidate;
++        }
++      }
++    }
+     if (sankofaYamlPath.length > 0) {
+       NSString* yamlContents = [NSString stringWithContentsOfFile:sankofaYamlPath
+                                                          encoding:NSUTF8StringEncoding
+-- 
+2.50.1 (Apple Git-155)
+

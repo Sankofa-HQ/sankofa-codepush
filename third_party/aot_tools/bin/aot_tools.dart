@@ -244,7 +244,7 @@ class LinkCommand extends Command<int> {
 
     // Write the .vmcode file = LinkTable.toBytes() + patch AOT bytes.
     final patchBytes = File(patchPath).readAsBytesSync();
-    final linkTableBytes = linkTable.toBytes(padToAlignment: 4096);
+    final linkTableBytes = linkTable.toBytes(padToAlignment: 16384);
     final outFile = File(outputPath);
     outFile.parent.createSync(recursive: true);
     outFile.openSync(mode: FileMode.write)

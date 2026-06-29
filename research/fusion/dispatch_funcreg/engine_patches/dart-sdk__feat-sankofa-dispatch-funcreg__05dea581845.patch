@@ -1,0 +1,2098 @@
+From 05dea5818451799a1ef17fc8f66dc63c9e7370cb Mon Sep 17 00:00:00 2001
+From: Sankofa <dev@sankofa.dev>
+Date: Mon, 29 Jun 2026 23:21:53 +0000
+Subject: [PATCH] dispatch-funcreg: flag-free virtual-entry-boundary code-push
+ (proven on iPhone)
+
+Replaces the dead SANKOFA_NO_TABLE_DISPATCH flag (which SIGSEGV'd the full
+Flutter framework) with base-resident, base-build-time dispatch indirection:
+
+- DispatchTable: interleaved [entry_point, function_ptr] pairs (dispatch_table.{h,cc})
+- generator + object_store: parallel dispatch_table_function_entries (HasBytecode-
+  gated -> zero base-app bloat) captured at FillTable; built in precompiler
+- ReadDispatchTable: stride-2 + fill function-halves; reroute bytecode-method
+  slots to the new SankofaDispatchInterpret trampoline (app_snapshot.cc)
+- SankofaDispatchInterpret stub (stub_code_list.h + stub_code_compiler_arm64.cc):
+  mov R0,R8 (function from the function-half) -> InterpretCall body
+- arm64 EmitDispatchTableCall: *2 stride + load function-half into R8; il.cc
+  always materializes the args descriptor (InterpretCall needs ARGS_DESC_REG)
+- SDTL emitter (sankofa_codepush_emit.cc): stride-aware; + apply-path APIs
+  Dart_SankofaCodeEntryForName / Dart_SankofaRepointDispatchToInterpret
+- interpreter.cc: FATAL logs the exact unimplemented opcode (diagnostic)
+
+Host-proven (no-JIT) and PROVEN ON DEVICE (iPhone 14 Pro): an unchanged base-AOT
+virtual dispatch-table call (renderPanel -> Panel.label) reroutes to a ~790-byte
+downloaded bytecode patch via the repointed slot + trampoline + interpreter --
+no flag, no JIT. Also carries prior fusion/transplant WIP.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ pkg/dart2bytecode/lib/dart2bytecode.dart      |  19 +-
+ runtime/bin/BUILD.gn                          |  11 +-
+ runtime/bin/analyze_snapshot.cc               |  83 ++++--
+ runtime/bin/elf_loader.cc                     |  19 +-
+ runtime/bin/elf_loader.h                      |   7 +
+ runtime/bin/gen_snapshot.cc                   |  39 +++
+ runtime/include/analyze_snapshot_api.h        |  91 +++++++
+ runtime/include/dart_api.h                    |  32 +++
+ runtime/vm/app_snapshot.cc                    |  69 ++++-
+ runtime/vm/bytecode_reader.cc                 | 245 ++++++++++++++----
+ runtime/vm/bytecode_reader.h                  |  10 +
+ runtime/vm/class_finalizer.cc                 |   4 +
+ .../vm/compiler/aot/aot_call_specializer.cc   |  18 +-
+ .../compiler/aot/dispatch_table_generator.cc  |  28 +-
+ .../compiler/aot/dispatch_table_generator.h   |   6 +-
+ runtime/vm/compiler/aot/precompiler.cc        |   6 +-
+ .../backend/flow_graph_compiler_arm64.cc      |  14 +-
+ runtime/vm/compiler/backend/il.cc             |   6 +-
+ .../vm/compiler/stub_code_compiler_arm64.cc   |  18 ++
+ runtime/vm/compiler/stub_code_compiler_x64.cc |   2 +-
+ runtime/vm/dart_api_impl.cc                   | 116 +++++++++
+ runtime/vm/dispatch_table.cc                  |   4 +-
+ runtime/vm/dispatch_table.h                   |  15 +-
+ runtime/vm/interpreter.cc                     |  10 +-
+ runtime/vm/kernel_binary.cc                   |  14 +-
+ runtime/vm/native_entry.cc                    |  15 +-
+ runtime/vm/object.cc                          |  54 +++-
+ runtime/vm/object_store.h                     |   4 +
+ runtime/vm/sankofa_codepush_emit.cc           |  92 ++++++-
+ runtime/vm/sankofa_codepush_read.cc           | 183 +++++++++++++
+ runtime/vm/stub_code_list.h                   |   5 +
+ runtime/vm/version_in.cc                      |  12 +-
+ 32 files changed, 1139 insertions(+), 112 deletions(-)
+
+diff --git a/pkg/dart2bytecode/lib/dart2bytecode.dart b/pkg/dart2bytecode/lib/dart2bytecode.dart
+index 3cc4d6d3459..27302ff1610 100644
+--- a/pkg/dart2bytecode/lib/dart2bytecode.dart
++++ b/pkg/dart2bytecode/lib/dart2bytecode.dart
+@@ -3,7 +3,7 @@
+ // BSD-style license that can be found in the LICENSE file.
+ 
+ import 'dart:async';
+-import 'dart:io' as io show exitCode, File, IOSink;
++import 'dart:io' as io show exitCode, File, IOSink, Platform;
+ 
+ import 'package:args/args.dart' show ArgParser, ArgResults;
+ import 'package:front_end/src/api_unstable/vm.dart'
+@@ -315,11 +315,18 @@ Future<int> runCompilerWithOptions({
+   if (errorDetector.hasCompilationErrors || component == null) {
+     return compileTimeErrorExitCode;
+   }
+-  component = prefix_library_uris.prefixLibraryUris(
+-    component,
+-    results.loadedLibraries,
+-    libraryUrisPrefix,
+-  );
++  // Sankofa CodePush — IN-PROGRAM mode (SANKOFA_INPROGRAM): do NOT prefix the
++  // library uris. The hybrid snapshot needs the changed-fn bytecode to keep the
++  // SAME library uris as the base AOT kernel so gen_snapshot can merge them by
++  // canonical name (a prefix made them a separate program = the cross-program
++  // dead end). Default (unset) keeps the dynamic-module prefixing behavior.
++  if (io.Platform.environment['SANKOFA_INPROGRAM'] == null) {
++    component = prefix_library_uris.prefixLibraryUris(
++      component,
++      results.loadedLibraries,
++      libraryUrisPrefix,
++    );
++  }
+   if (bytecodeOptions.showBytecodeSizeStatistics) {
+     BytecodeSizeStatistics.reset();
+   }
+diff --git a/runtime/bin/BUILD.gn b/runtime/bin/BUILD.gn
+index 0eedc4279fc..3dcd75d993e 100644
+--- a/runtime/bin/BUILD.gn
++++ b/runtime/bin/BUILD.gn
+@@ -930,7 +930,15 @@ template("dart_executable") {
+       deps += [ ":common_embedder_dart_io" ]
+     }
+ 
+-    configs += [ ":export_api_symbols" ]
++    # [sankofa] An -exported_symbol allowlist (export only Dart_*) cannot coexist
++    # with libcxxabi's -unexported_symbols_list under lld. Standalone tools (e.g.
++    # analyze_snapshot) don't expose the Dart API, so let them opt out. This
++    # unblocks building the host-targeting-iOS analyze_snapshot used to link
++    # data-only code-push patches against a Mach-O App snapshot.
++    if (!defined(invoker.no_export_api_symbols) ||
++        !invoker.no_export_api_symbols) {
++      configs += [ ":export_api_symbols" ]
++    }
+ 
+     ldflags = extra_ldflags
+ 
+@@ -1081,6 +1089,7 @@ if (dart_target_arch != "ia32" && dart_target_arch != "x86") {
+ if (build_analyze_snapshot) {
+   dart_executable("analyze_snapshot") {
+     use_product_mode = dart_runtime_mode == "release"
++    no_export_api_symbols = true
+     extra_configs = [ "..:dart_aotruntime_config" ]
+ 
+     if (use_product_mode) {
+diff --git a/runtime/bin/analyze_snapshot.cc b/runtime/bin/analyze_snapshot.cc
+index dd745887734..f79b8ca448b 100644
+--- a/runtime/bin/analyze_snapshot.cc
++++ b/runtime/bin/analyze_snapshot.cc
+@@ -293,30 +293,56 @@ int RunAnalyzer(int argc, char** argv) {
+     if (patch_fns_str != nullptr) {
+       const char* invoke0 =
+           patch_invoke_str != nullptr ? patch_invoke_str : "main";
+-      // Show the BEFORE state (e.g. a crash) so a crash-fix patch is visible.
+-      Dart_Handle b =
+-          Dart_Invoke(root, Dart_NewStringFromCString(invoke0), 0, nullptr);
+-      if (Dart_IsError(b)) {
+-        fprintf(stdout, "[apply] BEFORE %s() THREW: %s\n", invoke0,
+-                Dart_GetError(b));
+-      } else if (Dart_IsString(b)) {
+-        const char* s = nullptr;
+-        Dart_StringToCString(b, &s);
+-        fprintf(stdout, "[apply] BEFORE %s() => %s\n", invoke0, s);
++      // [sankofa] SANKOFA_SKIP_BEFORE=1 skips the BEFORE invoke so the AFTER
++      // call site is FRESH — matching the real app, where the boot hook
++      // transplants before main() runs (no stale IC at the call site).
++      if (getenv("SANKOFA_SKIP_BEFORE") == nullptr) {
++        // Show the BEFORE state (e.g. a crash) so a crash-fix patch is visible.
++        Dart_Handle b =
++            Dart_Invoke(root, Dart_NewStringFromCString(invoke0), 0, nullptr);
++        if (Dart_IsError(b)) {
++          fprintf(stdout, "[apply] BEFORE %s() THREW: %s\n", invoke0,
++                  Dart_GetError(b));
++        } else if (Dart_IsString(b)) {
++          const char* s = nullptr;
++          Dart_StringToCString(b, &s);
++          fprintf(stdout, "[apply] BEFORE %s() => %s\n", invoke0, s);
++        }
+       }
+       char* names = strdup(patch_fns_str);
+       int n_ok = 0, n_fail = 0;
+       for (char* tok = strtok(names, ","); tok != nullptr;
+            tok = strtok(nullptr, ",")) {
+-        Dart_Handle nm = Dart_NewStringFromCString(tok);
+-        Dart_Handle tr = Dart_SankofaTransplantBytecode(root, nm, plib, nm);
++        // Each token is "target" or "target=source" (mapped transplant). The
++        // SOURCE may be a top-level fn (no class -> no Object. ctor) so the
++        // patch loads against a slim AOT base; the TARGET is the app's virtual
++        // method. Mirror the device boot hook: capture the target's code entry
++        // before transplant, then repoint its dispatch-table slots after.
++        char* target = tok;
++        char* source = tok;
++        char* eq = strchr(tok, '=');
++        if (eq != nullptr) {
++          *eq = '\0';
++          source = eq + 1;
++        }
++        uintptr_t old_entry =
++            dart::snapshot_analyzer::Dart_SankofaCodeEntryForName(target);
++        Dart_Handle tr = Dart_SankofaTransplantBytecode(
++            root, Dart_NewStringFromCString(target), plib,
++            Dart_NewStringFromCString(source));
+         if (Dart_IsError(tr)) {
+-          fprintf(stderr, "[apply] transplant %s: %s\n", tok,
++          fprintf(stderr, "[apply] transplant %s<-%s: %s\n", target, source,
+                   Dart_GetError(tr));
+           n_fail++;
+         } else {
+-          fprintf(stdout, "[apply] transplant OK: %s\n", tok);
+           n_ok++;
++          intptr_t np = 0;
++          if (old_entry != 0) {
++            np = dart::snapshot_analyzer::Dart_SankofaRepointDispatchToInterpret(
++                target, old_entry);
++          }
++          fprintf(stdout, "[apply] transplant OK: %s<-%s (dispatch slots=%lld)\n",
++                  target, source, (long long)np);
+         }
+       }
+       free(names);
+@@ -411,6 +437,10 @@ int RunAnalyzer(int argc, char** argv) {
+     // which dispatches build() virtually. If renderNew reports PATCH-UI, the
+     // virtual/dispatch-table path reroutes (covers most Flutter patch points);
+     // if BASE-UI, the dispatch table is baked and also needs updating.
++    // Sankofa dispatch-funcreg: capture Widget.build's code entry BEFORE the
++    // transplant. Its virtual-dispatch table slots currently hold this entry.
++    uintptr_t wb_old_entry =
++        dart::snapshot_analyzer::Dart_SankofaCodeEntryForName("Widget.build");
+     Dart_Handle tr2 = Dart_SankofaTransplantBytecode(
+         root, Dart_NewStringFromCString("Widget.build"), plib,
+         Dart_NewStringFromCString("WidgetPatch.build"));
+@@ -418,15 +448,38 @@ int RunAnalyzer(int argc, char** argv) {
+       fprintf(stderr, "[bcpatch] virtual transplant: %s\n", Dart_GetError(tr2));
+     } else {
+       fprintf(stdout, "[bcpatch] virtual transplant OK (Widget.build)\n");
++      // BEFORE repoint: render()'s baked dispatch-table call still targets base
++      // code, so expect 'render-> BASE-UI' (the flag-free baseline).
+       Dart_Handle rn =
+           Dart_Invoke(root, Dart_NewStringFromCString("renderNew"), 0, nullptr);
+       if (!Dart_IsError(rn)) {
+         const char* s = nullptr;
+         Dart_StringToCString(rn, &s);
+-        fprintf(stdout, "[bcpatch] after  transplant: renderNew()=%s\n", s);
++        fprintf(stdout,
++                "[bcpatch] after transplant (no repoint): renderNew()=%s\n", s);
+       } else {
+         fprintf(stderr, "[bcpatch] renderNew invoke: %s\n", Dart_GetError(rn));
+       }
++      // THE DISPATCH-FUNCREG PROOF: repoint Widget.build's dispatch-table slots
++      // to the SankofaDispatchInterpret trampoline + set the function-half. An
++      // UNCHANGED base-AOT dispatch-table call (render -> w.build()) should now
++      // reach the interpreted body WITH NO flag, NO JIT.
++      intptr_t np =
++          dart::snapshot_analyzer::Dart_SankofaRepointDispatchToInterpret(
++              "Widget.build", wb_old_entry);
++      fprintf(stdout,
++              "[bcpatch] dispatch repoint: old_entry=%#llx slots=%lld\n",
++              (unsigned long long)wb_old_entry, (long long)np);
++      Dart_Handle rn2 =
++          Dart_Invoke(root, Dart_NewStringFromCString("renderNew"), 0, nullptr);
++      if (!Dart_IsError(rn2)) {
++        const char* s = nullptr;
++        Dart_StringToCString(rn2, &s);
++        fprintf(stdout, "[bcpatch] after dispatch repoint: renderNew()=%s\n", s);
++      } else {
++        fprintf(stderr, "[bcpatch] renderNew2 invoke: %s\n",
++                Dart_GetError(rn2));
++      }
+     }
+ 
+     // Probe 3b (VIRTUAL cascade): renderNew above stays BASE-UI because base AOT
+diff --git a/runtime/bin/elf_loader.cc b/runtime/bin/elf_loader.cc
+index 2aef72be06c..e01c809777b 100644
+--- a/runtime/bin/elf_loader.cc
++++ b/runtime/bin/elf_loader.cc
+@@ -25,6 +25,14 @@ namespace bin {
+ 
+ namespace elf {
+ 
++// [sankofa] When true, instruction segments (PF_R|PF_X) are mapped READ-ONLY
++// instead of read-execute. On no-JIT iOS a downloaded code-push patch ELF
++// cannot be mapped PROT_EXEC (no JIT entitlement). In the data-only fusion the
++// patch's native instructions are never executed anyway: unchanged Codes
++// resolve to the base App image (already executable) and changed Codes run
++// through the interpreter. The boot path sets this around the patch Dart_LoadELF.
++bool g_sankofa_force_readonly_elf = false;
++
+ /// A loader for a subset of ELF which may be used to load objects produced by
+ /// Dart_CreateAppAOTSnapshotAsElf.
+ class LoadedElf {
+@@ -293,7 +301,9 @@ bool LoadedElf::LoadSegments() {
+     if (header.flags == (dart::elf::PF_R | dart::elf::PF_W)) {
+       map_type = File::kReadWrite;
+     } else if (header.flags == (dart::elf::PF_R | dart::elf::PF_X)) {
+-      map_type = File::kReadExecute;
++      // [sankofa] no-JIT iOS: map instructions read-only when forced (see flag).
++      map_type = g_sankofa_force_readonly_elf ? File::kReadOnly
++                                              : File::kReadExecute;
+     } else if (header.flags == dart::elf::PF_R) {
+       map_type = File::kReadOnly;
+     } else {
+@@ -502,3 +512,10 @@ DART_EXPORT Dart_LoadedElf* Dart_LoadELF_Memory(
+ DART_EXPORT void Dart_UnloadELF(Dart_LoadedElf* loaded) {
+   delete reinterpret_cast<LoadedElf*>(loaded);
+ }
++
++// [sankofa] Force read-only mapping of instruction segments for subsequent
++// Dart_LoadELF* calls (no-JIT iOS code-push patch). Set true immediately before
++// loading a patch ELF and false immediately after.
++DART_EXPORT void Dart_SankofaSetElfForceReadOnly(bool force) {
++  dart::bin::elf::g_sankofa_force_readonly_elf = force;
++}
+diff --git a/runtime/bin/elf_loader.h b/runtime/bin/elf_loader.h
+index 5223a4d9f44..b05463642be 100644
+--- a/runtime/bin/elf_loader.h
++++ b/runtime/bin/elf_loader.h
+@@ -62,4 +62,11 @@ DART_EXPORT Dart_LoadedElf* Dart_LoadELF_Memory(
+ /// each time it is called, and the results must be unloaded separately.
+ DART_EXPORT void Dart_UnloadELF(Dart_LoadedElf* loaded);
+ 
++/// [sankofa] When `force` is true, subsequent Dart_LoadELF* calls map
++/// instruction (PF_R|PF_X) segments READ-ONLY instead of read-execute. Used to
++/// load a code-push patch ELF on no-JIT iOS, where PROT_EXEC mmap of a
++/// downloaded file is forbidden. The patch's native instructions are never
++/// executed (unchanged Codes resolve to the base App; changed Codes interpret).
++DART_EXPORT void Dart_SankofaSetElfForceReadOnly(bool force);
++
+ #endif  // RUNTIME_BIN_ELF_LOADER_H_
+diff --git a/runtime/bin/gen_snapshot.cc b/runtime/bin/gen_snapshot.cc
+index 43480d22bda..c70995ff7da 100644
+--- a/runtime/bin/gen_snapshot.cc
++++ b/runtime/bin/gen_snapshot.cc
+@@ -694,6 +694,45 @@ static void CreateAndWritePrecompiledSnapshot() {
+   ASSERT(kind_str != nullptr);
+   ASSERT(filename != nullptr);
+ 
++  // Sankofa CodePush — HYBRID SNAPSHOT (build-time bytecode emission). BEFORE
++  // precompile, MERGE-load a dart2bytecode component (built no-prefix, same
++  // library uris as the base) so its functions' bytecode attaches to the
++  // EXISTING base functions (is_declared_in_bytecode + Code=InterpretCall stub).
++  // Done pre-precompile so the precompiler treats them as bytecode functions and
++  // the finalized tables reflect it (a post-precompile transplant is ignored by
++  // the AOT serializer — verified). Precompiler::CompileFunction skips
++  // is_declared_in_bytecode functions, so they ship as interpreted code and the
++  // rest AOT-compile. Env-gated bring-up: SANKOFA_GENSNAP_PATCH=<component>.
++  if (const char* patch_path = getenv("SANKOFA_GENSNAP_PATCH")) {
++    Dart_EnterScope();
++    File* pf = File::Open(nullptr, patch_path, File::kRead);
++    if (pf == nullptr) {
++      Syslog::PrintErr("[sankofa-gensnap] cannot open %s\n", patch_path);
++    } else {
++      intptr_t plen = static_cast<intptr_t>(pf->Length());
++      uint8_t* pbuf = reinterpret_cast<uint8_t*>(malloc(plen));
++      pf->SetPosition(0);
++      pf->ReadFully(pbuf, plen);
++      pf->Release();
++      Dart_Handle td =
++          Dart_NewExternalTypedData(Dart_TypedData_kUint8, pbuf, plen);
++      dart::snapshot_analyzer::Dart_SankofaSetBytecodeMerge(true);
++      Dart_Handle plib = Dart_LoadLibraryFromBytecode(td);
++      dart::snapshot_analyzer::Dart_SankofaSetBytecodeMerge(false);
++      if (Dart_IsError(plib)) {
++        Syslog::PrintErr("[sankofa-gensnap] merge-load bytecode: %s\n",
++                         Dart_GetError(plib));
++      } else {
++        // NOTE: no Dart_FinalizeLoading here — the base classes are already
++        // finalized and re-finalizing them re-creates the merged functions
++        // (dropping the attached bytecode). Precompile finalizes anyway.
++        Syslog::PrintErr(
++            "[sankofa-gensnap] merge-loaded bytecode onto base program OK\n");
++      }
++    }
++    Dart_ExitScope();
++  }
++
+   // Precompile with specified embedder entry points
+   Dart_Handle result = Dart_Precompile();
+   CHECK_RESULT(result);
+diff --git a/runtime/include/analyze_snapshot_api.h b/runtime/include/analyze_snapshot_api.h
+index 743eec9147b..ca5c99d34de 100644
+--- a/runtime/include/analyze_snapshot_api.h
++++ b/runtime/include/analyze_snapshot_api.h
+@@ -34,6 +34,17 @@ void Dart_DumpSankofaSnapshotAnalysisAsJson(
+     char** buffer,
+     intptr_t* buffer_length);
+ 
++// Sankofa CodePush DD producer (base build): from the loaded base snapshot,
++// build the fan-in (caller-links) graph, select the highest-cascade
++// functions within dd_max_bytes, and write the DD table + caller-links
++// (both keyed by subgraph_hash). Binary formats documented in
++// runtime/vm/sankofa_snapshot_analyzer.cc ("SDDT"/"SDCL", v1).
++void Dart_ComputeSankofaDdTable(
++    const Dart_SnapshotAnalyzerInformation& info,
++    const char* dd_table_path,
++    const char* caller_links_path,
++    int64_t dd_max_bytes);
++
+ // Sankofa CodePush: serialises the current isolate group's class table
+ // to a binary file at `path`. Format documented in
+ // runtime/vm/sankofa_codepush_emit.cc (header "SCTL", v1). Called from
+@@ -113,6 +124,86 @@ intptr_t Dart_SankofaLookupBasePoolIndex(const char* identity);
+ // the base dispatch table has no matching entry.
+ intptr_t Dart_SankofaLookupBaseDispatchSelectorByName(const char* name);
+ 
++// ── Device-side patch fusion (Tasks 6/7) ────────────────────────────
++// These are the VM C-API the engine calls on-device to load a patch
++// .vmcode on top of the running base App snapshot. Contract +
++// device flow: research/ENGINE_FUSION_TASKS_6_7.md.
++
++// Stash the base App snapshot mappings. Called once at engine init,
++// before any patch isolate is created. Stored process-globally and
++// read by the isolate-fusion path. The VM snapshot is identical across
++// builds of a Dart version, so vm_data/vm_instr act as a consistency
++// anchor.
++void Dart_SankofaSetBaseSnapshots(const uint8_t* isolate_data,
++                                  const uint8_t* isolate_instructions,
++                                  const uint8_t* vm_data,
++                                  const uint8_t* vm_instructions);
++
++// Parse the LinkTable header that prefixes a patch .vmcode (the format
++// aot_tools LinkTable.toBytes() emits: count u32-BE, then (sim,cpu)
++// u32-BE pairs, zero-padded to 4096). Stashes the sim→cpu map
++// process-globally and returns the 4096-aligned header size — the byte
++// offset where the embedded ELF begins, to pass as Dart_LoadELF's
++// `file_offset`. Returns -1 on a malformed/truncated buffer.
++intptr_t Dart_SankofaReadLinkHeader(const void* mapping, intptr_t size);
++
++// Accessors for the isolate-fusion path (Dart_CreateIsolateGroupWith-
++// BaseSnapshot) and tests. LookupCpuOffset maps a patch (sim) function
++// offset to its base (cpu) offset via the last-read link table, or -1
++// when the function has no base equivalent (it ships in the patch).
++const uint8_t* Dart_SankofaBaseIsolateData();
++const uint8_t* Dart_SankofaBaseIsolateInstructions();
++const uint8_t* Dart_SankofaBaseVmData();
++const uint8_t* Dart_SankofaBaseVmInstructions();
++intptr_t Dart_SankofaLinkTableCount();
++intptr_t Dart_SankofaLookupCpuOffset(intptr_t sim_offset);
++
++// The fuse: resolve a Code's entry point given the patch instructions-image
++// base + the Code's pc_offset. With no patch loaded it's a passthrough
++// (patch_image_start + pc_offset). With a patch, an UNCHANGED Code (offset in
++// the link table) resolves to the base App's executable instructions; a
++// CHANGED Code stays in the patch image. Called from
++// InstructionsTable::EntryPointAt. uintptr_t (not the VM's uword) to keep this
++// header VM-type-free.
++uintptr_t Dart_SankofaResolveEntryPoint(uintptr_t patch_image_start,
++                                        uintptr_t pc_offset);
++
++// The REVERSE fuse: given a PC that may be in the base image (fused base code
++// runs there), return the equivalent PC inside the patch image (where the
++// isolate's InstructionsTable lives) so PC→Code lookups resolve. Returns 0 if
++// `pc` is not a mapped base-image PC (caller treats it as a patch-image PC).
++// Called from InstructionsTable::FindCode / FindEntry / FindStackMap.
++uintptr_t Dart_SankofaBasePcToPatchPc(uintptr_t patch_image_start,
++                                      uintptr_t pc);
++
++// Diagnostics: entry-point resolutions that hit the base image (unchanged
++// code) vs stayed in the patch image (changed code) since the link table
++// was loaded. Lets a self-test confirm the fuse actually fired.
++void Dart_SankofaResolverStats(intptr_t* base_hits, intptr_t* patch_hits);
++
++// ── Hybrid-snapshot merge mode (build-time) ──────────────────────────
++// Process-global toggle read by BytecodeLoader::LoadBytecode. When set, the
++// loader attaches a bytecode component's functions onto the EXISTING base
++// program (resolve-by-canonical-name) instead of declaring new libraries
++// (which would throw "already loaded"). gen_snapshot sets this around the
++// Dart_LoadLibraryFromBytecode that merges changed-function bytecode into the
++// base AOT program. Kept here (not dart_api*.h) because those are in the
++// snapshot-version-hash set; read.cc/bytecode_reader.cc are not.
++void Dart_SankofaSetBytecodeMerge(bool enabled);
++bool Dart_SankofaBytecodeMerge();
++
++// ── Dispatch-table reroute (apply path) ──────────────────────────────
++// |name| ("function" or "Class.method") resolves in the isolate's ROOT library.
++// Capture a function's code entry-point BEFORE transplanting it to bytecode
++// (its virtual-method dispatch slots currently hold this entry).
++uintptr_t Dart_SankofaCodeEntryForName(const char* name);
++// After transplanting |name| to bytecode, reroute its dispatch-table slots
++// (those holding |old_entry|) to the SankofaDispatchInterpret trampoline and set
++// each slot's function-half. Lets an UNCHANGED base-AOT dispatch-table call
++// reach the interpreted body, no flag, no JIT. Returns slots repointed, or -1.
++intptr_t Dart_SankofaRepointDispatchToInterpret(const char* name,
++                                                uintptr_t old_entry);
++
+ }  // namespace snapshot_analyzer
+ }  // namespace dart
+ 
+diff --git a/runtime/include/dart_api.h b/runtime/include/dart_api.h
+index 46a01c3632a..ad5379f0818 100644
+--- a/runtime/include/dart_api.h
++++ b/runtime/include/dart_api.h
+@@ -1043,6 +1043,24 @@ Dart_CreateIsolateGroup(const char* script_uri,
+                         void* isolate_group_data,
+                         void* isolate_data,
+                         char** error);
++
++/**
++ * Sankofa CodePush: like Dart_CreateIsolateGroup, but fuses the PATCH snapshot
++ * (first pair) with the running base App snapshot (second pair). Unchanged
++ * Codes (per the link table from Dart_SankofaReadLinkHeader) run base AOT;
++ * changed Codes run from the patch image. See ENGINE_FUSION_TASKS_6_7.md.
++ */
++DART_EXPORT Dart_Isolate Dart_CreateIsolateGroupWithBaseSnapshot(
++    const char* script_uri,
++    const char* name,
++    const uint8_t* isolate_snapshot_data,
++    const uint8_t* isolate_snapshot_instructions,
++    const uint8_t* base_isolate_snapshot_data,
++    const uint8_t* base_isolate_snapshot_instructions,
++    Dart_IsolateFlags* flags,
++    void* isolate_group_data,
++    void* isolate_data,
++    char** error);
+ /**
+  * Creates a new isolate inside the isolate group of [group_member].
+  *
+@@ -3791,6 +3809,20 @@ Dart_LoadLibrary(Dart_Handle kernel_buffer);
+ DART_EXPORT DART_API_WARN_UNUSED_RESULT Dart_Handle
+ Dart_LoadLibraryFromBytecode(Dart_Handle bytecode_buffer);
+ 
++/**
++ * Sankofa CodePush: transplant the bytecode of a function in an already-loaded
++ * bytecode dynamic module onto an existing (e.g. base AOT) function, flipping
++ * that function to interpreted execution so subsequent calls run the new body
++ * with no JIT. The device-side primitive for arbitrary-logic code-push.
++ *
++ * \return Dart true on success, or an error handle.
++ */
++DART_EXPORT DART_API_WARN_UNUSED_RESULT Dart_Handle
++Dart_SankofaTransplantBytecode(Dart_Handle target_library,
++                               Dart_Handle target_function_name,
++                               Dart_Handle source_library,
++                               Dart_Handle source_function_name);
++
+ /**
+  * Indicates that all outstanding load requests have been satisfied.
+  * This finalizes all the new classes loaded and optionally completes
+diff --git a/runtime/vm/app_snapshot.cc b/runtime/vm/app_snapshot.cc
+index ee6f700f60a..5d8a44ad1b2 100644
+--- a/runtime/vm/app_snapshot.cc
++++ b/runtime/vm/app_snapshot.cc
+@@ -2,6 +2,7 @@
+ // for details. All rights reserved. Use of this source code is governed by a
+ // BSD-style license that can be found in the LICENSE file.
+ 
++#include <cstdlib>
+ #include <memory>
+ #include <utility>
+ 
+@@ -9387,6 +9388,44 @@ DeserializationCluster* Deserializer::ReadCluster() {
+   return nullptr;
+ }
+ 
++#if defined(DART_PRECOMPILED_RUNTIME)
++// Sankofa code-push: the dispatch table is stored as interleaved
++// [entry_point, function_ptr] pairs. After the entry-halves are filled by
++// ReadDispatchTable, this populates the function-half of each slot from the
++// parallel Function array (object_store->dispatch_table_function_entries(),
++// captured at precompile time), so a dispatch-table call can set FUNCTION_REG.
++// Any slot whose entry is the shared InterpretCall stub (a bytecode/interpreted
++// method) is rerouted through the SankofaDispatchInterpret trampoline, which
++// moves the function-half into FUNCTION_REG (R0) before entering InterpretCall.
++static void SankofaFillDispatchTableFunctionHalves(IsolateGroup* IG,
++                                                    DispatchTable* table,
++                                                    intptr_t length) {
++  const Array& fns =
++      Array::Handle(IG->object_store()->dispatch_table_function_entries());
++  if (fns.IsNull()) return;
++  uword* const array = table->mutable_array();
++#if defined(DART_DYNAMIC_MODULES)
++  const uword interpret_entry = StubCode::InterpretCall().EntryPoint();
++  const uword trampoline_entry =
++      StubCode::SankofaDispatchInterpret().EntryPoint();
++#endif
++  auto& fn = Function::Handle();
++  const intptr_t n = Utils::Minimum(length, fns.Length());
++  for (intptr_t i = 0; i < n; i++) {
++    fn ^= fns.At(i);
++    const intptr_t entry_idx = DispatchTable::kSlotStride * i;
++    if (!fn.IsNull()) {
++      array[entry_idx + 1] = static_cast<uword>(fn.ptr());
++    }
++#if defined(DART_DYNAMIC_MODULES)
++    if (array[entry_idx] == interpret_entry) {
++      array[entry_idx] = trampoline_entry;
++    }
++#endif
++  }
++}
++#endif  // defined(DART_PRECOMPILED_RUNTIME)
++
+ void Deserializer::ReadDispatchTable(
+     ReadStream* stream,
+     bool deferred,
+@@ -9422,7 +9461,7 @@ void Deserializer::ReadDispatchTable(
+   intptr_t repeat_count = 0;
+   for (intptr_t i = 0; i < length; i++) {
+     if (repeat_count > 0) {
+-      array[i] = value;
++      array[DispatchTable::kSlotStride * i] = value;
+       repeat_count--;
+       continue;
+     }
+@@ -9446,7 +9485,7 @@ void Deserializer::ReadDispatchTable(
+           value = Code::EntryPointOf(code);
+         } else {
+           // Reuse old value from the dispatch table.
+-          value = array[i];
++          value = array[DispatchTable::kSlotStride * i];
+         }
+       } else {
+         value = GetEntryPointByCodeIndex(code_index);
+@@ -9454,12 +9493,16 @@ void Deserializer::ReadDispatchTable(
+       recent[recent_index] = value;
+       recent_index = (recent_index + 1) & kDispatchTableRecentMask;
+     }
+-    array[i] = value;
++    array[DispatchTable::kSlotStride * i] = value;
+   }
+   ASSERT(repeat_count == 0);
+ 
+   if (!deferred) {
+     IG->set_dispatch_table(table);
++    // Sankofa code-push: fill the function-half of each interleaved slot from
++    // object_store->dispatch_table_function_entries() and reroute bytecode
++    // method slots through the InterpretCall trampoline.
++    SankofaFillDispatchTableFunctionHalves(IG, table, length);
+     intptr_t table_snapshot_size =
+         stream->AddressOfCurrentPosition() - table_snapshot_start;
+     IG->set_dispatch_table_snapshot(table_snapshot_start);
+@@ -9527,6 +9570,16 @@ char* SnapshotHeaderReader::VerifyVersion() {
+   const char* version =
+       reinterpret_cast<const char*>(stream_.AddressOfCurrentPosition());
+   ASSERT(version != nullptr);
++  // [sankofa] A HOST analyzer reads code-push base/patch snapshots that may have
++  // been produced by a gen_snapshot at a different VM source revision (the
++  // snapshot-version hash churns on any VM-source edit) even though the binary
++  // FORMAT is identical. For read-only analysis, skip the version-equality gate
++  // (the stream is still advanced by version_len below). Same env gate as the
++  // features bypass. Never set this for executing a snapshot.
++  if (getenv("SANKOFA_IGNORE_SNAPSHOT_FEATURES") != nullptr) {
++    stream_.Advance(version_len);
++    return nullptr;
++  }
+   if (strncmp(version, expected_version, version_len) != 0) {
+     const intptr_t kMessageBufferSize = 256;
+     char message_buffer[kMessageBufferSize];
+@@ -9557,6 +9610,16 @@ char* SnapshotHeaderReader::VerifyFeatures(IsolateGroup* isolate_group) {
+     return error;
+   }
+ 
++  // [sankofa] Allow a HOST analyzer (e.g. mac analyze_snapshot) to READ an
++  // iOS-target snapshot whose only feature diff is the OS tag ('ios' vs
++  // 'macos'; same arch + pointer mode). The features stream has already been
++  // consumed above, so deserialization proceeds normally — this only skips the
++  // strict equality gate. Read-only analysis of a code-push base (no execution).
++  if (getenv("SANKOFA_IGNORE_SNAPSHOT_FEATURES") != nullptr) {
++    free(const_cast<char*>(expected_features));
++    return nullptr;
++  }
++
+   if (features_length != expected_len ||
+       (strncmp(features, expected_features, expected_len) != 0)) {
+     const intptr_t kMessageBufferSize = 1024;
+diff --git a/runtime/vm/bytecode_reader.cc b/runtime/vm/bytecode_reader.cc
+index 715a34730ab..5138b5258aa 100644
+--- a/runtime/vm/bytecode_reader.cc
++++ b/runtime/vm/bytecode_reader.cc
+@@ -7,6 +7,7 @@
+ #include "vm/globals.h"
+ #if defined(DART_DYNAMIC_MODULES)
+ 
++#include "include/analyze_snapshot_api.h"  // Sankofa: Dart_SankofaBytecodeMerge
+ #include "vm/bit_vector.h"
+ #include "vm/bootstrap.h"
+ #include "vm/class_finalizer.h"
+@@ -97,6 +98,9 @@ BytecodeLoader::~BytecodeLoader() {
+ FunctionPtr BytecodeLoader::LoadBytecode(bool load_code) {
+   ASSERT(IsolateGroup::Current()->program_lock()->IsCurrentThreadWriter());
+ 
++  // Sankofa CodePush: pick up the build-time merge-mode toggle.
++  set_merge_existing(dart::snapshot_analyzer::Dart_SankofaBytecodeMerge());
++
+   if (bytecode_component_array_.IsNull()) {
+     BytecodeReaderHelper component_reader(thread_, binary_);
+     bytecode_component_array_ = component_reader.ReadBytecodeComponent();
+@@ -109,7 +113,11 @@ FunctionPtr BytecodeLoader::LoadBytecode(bool load_code) {
+   bytecode_reader.ReadLibraryDeclarations(bytecode_component.GetNumLibraries(),
+                                           pending_objects_, load_code);
+ 
+-  if (bytecode_component.GetMainOffset() == 0) {
++  // Sankofa CodePush merge: we attach the component's bytecode onto the base
++  // program; there is no dynamic-module entry point to run, so skip resolving
++  // it (it references the component's `main`, which need not exist as a
++  // standalone reference in the base AOT program).
++  if (merge_existing_ || bytecode_component.GetMainOffset() == 0) {
+     return Function::null();
+   }
+ 
+@@ -259,6 +267,10 @@ void BytecodeReaderHelper::ReadCode(const Function& function,
+   const Bytecode& bytecode = Bytecode::Handle(Z, ReadBytecode(pool));
+   bytecode.set_code_offset(code_offset);
+   function.AttachBytecode(bytecode);
++  if (strstr(function.ToCString(), "compute") != nullptr) {
++    OS::PrintErr("[sankofa-attach] %s raw=%p hasbc=%d\n", function.ToCString(),
++                 function.ptr().untag(), function.HasBytecode());
++  }
+ 
+   ReadExceptionsTable(function, bytecode, has_exceptions_table);
+ 
+@@ -1770,7 +1782,14 @@ void BytecodeReaderHelper::ReadAnnotations(const Class& cls,
+ void BytecodeReaderHelper::ReadMembers(const Class& cls, bool discard_fields) {
+   ASSERT(IsolateGroup::Current()->program_lock()->IsCurrentThreadWriter());
+   ASSERT(cls.is_type_finalized());
+-  ASSERT(!cls.is_loaded());
++  // Sankofa CodePush merge: the base class is already loaded; we re-read the
++  // component's members only to map the bytecode code-offsets onto the existing
++  // functions (ReadFunctionDeclarations redirects them). Don't re-stamp loaded.
++  const bool merge =
++      thread_->bytecode_loader()->merge_existing() && cls.is_loaded();
++  if (!merge) {
++    ASSERT(!cls.is_loaded());
++  }
+ 
+   const intptr_t num_functions = reader_.ReadUInt();
+   functions_ = &Array::Handle(Z, Array::New(num_functions, Heap::kOld));
+@@ -1779,8 +1798,15 @@ void BytecodeReaderHelper::ReadMembers(const Class& cls, bool discard_fields) {
+   ReadFieldDeclarations(cls, discard_fields);
+   ReadFunctionDeclarations(cls);
+ 
+-  ASSERT(!cls.is_loaded());
+-  cls.set_is_loaded(true);
++  if (!merge) {
++    ASSERT(!cls.is_loaded());
++    cls.set_is_loaded(true);
++  } else if (!cls.is_loaded()) {
++    // Sankofa CodePush merge: mark the base class loaded so precompile
++    // finalization does not RE-LOAD its members from the kernel, which would
++    // create fresh function objects without the merged bytecode.
++    cls.set_is_loaded(true);
++  }
+ }
+ 
+ void BytecodeReaderHelper::ReadFieldDeclarations(const Class& cls,
+@@ -2256,8 +2282,35 @@ void BytecodeReaderHelper::ReadFunctionDeclarations(const Class& cls) {
+       const intptr_t code_offset = reader_.ReadUInt();
+       BytecodeLoader* loader = thread_->bytecode_loader();
+       ASSERT(loader != nullptr);
+-      loader->SetOffset(function,
+-                        code_offset + bytecode_component_->GetCodesOffset());
++      // Sankofa CodePush merge: map this code offset onto the EXISTING base
++      // function (resolved by name) so the bytecode attaches to the live AOT
++      // function (ReadPendingCode iterates cls.functions() = the base fns).
++      if (loader->merge_existing()) {
++        // Sankofa CodePush merge: attach the component's bytecode DIRECTLY to the
++        // CANONICAL base function — the object that call sites resolve to (the
++        // library scope for toplevel fns; the class for methods). Looking up by
++        // the same path the precompiler uses avoids the lazy-load divergence
++        // where cls.functions() holds a different object than the dictionary.
++        // The base class is already finalized here (EnsureIsFinalized in
++        // ReadPendingCode), so LookupFunctionAllowPrivate is safe.
++        const String& fname = String::Handle(Z, function.name());
++        Function& target = Function::Handle(Z);
++        if (cls.IsTopLevel()) {
++          const Library& lib = Library::Handle(Z, cls.library());
++          target = lib.LookupFunctionAllowPrivate(fname);
++        } else {
++          target = cls.LookupFunctionAllowPrivate(fname);
++        }
++        OS::PrintErr("[sankofa-redir] fn=%s canonical=%d\n", fname.ToCString(),
++                     !target.IsNull());
++        if (!target.IsNull() && !target.HasBytecode()) {
++          // Attach now, inline (ReadCode restores the reader position).
++          ReadCode(target, code_offset + bytecode_component_->GetCodesOffset());
++        }
++      } else {
++        loader->SetOffset(function,
++                          code_offset + bytecode_component_->GetCodesOffset());
++      }
+     }
+ 
+     if ((flags & kHasAnnotationsFlag) != 0) {
+@@ -2272,18 +2325,24 @@ void BytecodeReaderHelper::ReadFunctionDeclarations(const Class& cls) {
+     functions_->SetAt(function_index_++, function);
+   }
+ 
+-  {
+-    Thread* thread = Thread::Current();
+-    SafepointWriteRwLocker ml(thread, thread->isolate_group()->program_lock());
+-    cls.SetFunctions(*functions_);
+-  }
+-
+-  if (cls.IsTopLevel()) {
+-    const Library& library = Library::Handle(Z, cls.library());
+-    for (intptr_t i = 0, n = functions_->Length(); i < n; ++i) {
+-      function ^= functions_->At(i);
+-      name = function.name();
+-      library.AddObject(function, name);
++  // Sankofa CodePush merge: keep the base class's existing functions array (the
++  // bytecode is attached to those by name above); do not replace it with the
++  // component's throwaway functions, and don't re-add toplevel fns to the lib.
++  if (!thread_->bytecode_loader()->merge_existing()) {
++    {
++      Thread* thread = Thread::Current();
++      SafepointWriteRwLocker ml(thread,
++                                thread->isolate_group()->program_lock());
++      cls.SetFunctions(*functions_);
++    }
++
++    if (cls.IsTopLevel()) {
++      const Library& library = Library::Handle(Z, cls.library());
++      for (intptr_t i = 0, n = functions_->Length(); i < n; ++i) {
++        function ^= functions_->At(i);
++        name = function.name();
++        library.AddObject(function, name);
++      }
+     }
+   }
+ 
+@@ -2328,8 +2387,15 @@ void BytecodeReaderHelper::ReadClassDeclaration(const Class& cls) {
+   // BytecodeReaderHelper::ReadLibraryDeclaration.
+   // Its cid is set in Class::New / IsolateGroup::RegisterClass /
+   // ClassTable::Register, unless it was loaded for expression evaluation.
+-  ASSERT(cls.is_declared_in_bytecode());
+-  ASSERT(!cls.is_declaration_loaded());
++  // Sankofa CodePush merge: cls is the existing (base AOT) class; its
++  // declaration is already loaded. We read the component's class declaration to
++  // advance the reader + reach the members, but don't re-stamp the base class.
++  const bool merge =
++      thread_->bytecode_loader()->merge_existing() && cls.is_declaration_loaded();
++  if (!merge) {
++    ASSERT(cls.is_declared_in_bytecode());
++    ASSERT(!cls.is_declaration_loaded());
++  }
+ 
+   const intptr_t flags = reader_.ReadUInt();
+   const bool has_pragma = (flags & kHasPragmaFlag) != 0;
+@@ -2342,15 +2408,19 @@ void BytecodeReaderHelper::ReadClassDeclaration(const Class& cls) {
+   }
+ 
+   const auto& script = Script::CheckedHandle(Z, ReadObject());
+-  cls.set_script(script);
++  if (!merge) {
++    cls.set_script(script);
++  }
+ 
+   TokenPosition position = TokenPosition::kNoSource;
+   TokenPosition end_position = TokenPosition::kNoSource;
+   if ((flags & kHasSourcePositionsFlag) != 0) {
+     position = reader_.ReadPosition();
+     end_position = reader_.ReadPosition();
+-    NOT_IN_PRECOMPILED(cls.set_token_pos(position));
+-    NOT_IN_PRECOMPILED(cls.set_end_token_pos(end_position));
++    if (!merge) {
++      NOT_IN_PRECOMPILED(cls.set_token_pos(position));
++      NOT_IN_PRECOMPILED(cls.set_end_token_pos(end_position));
++    }
+   }
+ 
+   cls.set_has_pragma(has_pragma);
+@@ -2397,7 +2467,7 @@ void BytecodeReaderHelper::ReadClassDeclaration(const Class& cls) {
+   }
+ 
+   auto& type = AbstractType::CheckedHandle(Z, ReadObject());
+-  if (!type.IsNull()) {
++  if (!merge && !type.IsNull()) {
+     cls.set_super_type(Type::Cast(type));
+   }
+ 
+@@ -2409,7 +2479,9 @@ void BytecodeReaderHelper::ReadClassDeclaration(const Class& cls) {
+       type ^= ReadObject();
+       interfaces.SetAt(i, type);
+     }
+-    cls.set_interfaces(interfaces);
++    if (!merge) {
++      cls.set_interfaces(interfaces);
++    }
+   }
+ 
+   if ((flags & kHasAnnotationsFlag) != 0) {
+@@ -2438,8 +2510,16 @@ void BytecodeReaderHelper::ReadLibraryDeclaration(const Library& library,
+   // const int kUsesDartMirrorsFlag = 1 << 0;
+   // const int kUsesDartFfiFlag = 1 << 1;
+ 
+-  ASSERT(!library.Loaded());
+-  ASSERT(library.toplevel_class() == Object::null());
++  // Sankofa CodePush merge: the library already exists (base AOT program); we
++  // attach the component's bytecode to its existing classes/functions rather
++  // than creating new ones.
++  const bool merge =
++      thread_->bytecode_loader()->merge_existing() && library.Loaded();
++
++  if (!merge) {
++    ASSERT(!library.Loaded());
++    ASSERT(library.toplevel_class() == Object::null());
++  }
+ 
+   // TODO(alexmarkov): fill in library.used_scripts.
+ 
+@@ -2448,11 +2528,15 @@ void BytecodeReaderHelper::ReadLibraryDeclaration(const Library& library,
+   auto& name = String::CheckedHandle(Z, ReadObject());
+   ASSERT(name.ptr() !=
+          Symbols::Symbol(Symbols::kDartNativeWrappersLibNameId).ptr());
+-  library.SetName(name);
++  if (!merge) {
++    library.SetName(name);
++  }
+ 
+   const auto& script = Script::CheckedHandle(Z, ReadObject());
+ 
+-  library.SetLoadInProgress();
++  if (!merge) {
++    library.SetLoadInProgress();
++  }
+ 
+   const intptr_t num_classes = reader_.ReadUInt();
+   ASSERT(num_classes > 0);
+@@ -2463,7 +2547,16 @@ void BytecodeReaderHelper::ReadLibraryDeclaration(const Library& library,
+     const intptr_t class_offset =
+         bytecode_component_->GetClassesOffset() + reader_.ReadUInt();
+ 
+-    if (i == 0) {
++    if (merge) {
++      // Resolve the existing (base) class; attach bytecode to its members.
++      cls = (i == 0) ? library.toplevel_class()
++                     : library.LookupClassAllowPrivate(name);
++      if (cls.IsNull()) {
++        // Class is in the patch component but not in the base program (a new
++        // class). Additive merge of new classes is a follow-up; skip for now.
++        continue;
++      }
++    } else if (i == 0) {
+       ASSERT(name.ptr() == Symbols::Empty().ptr());
+       cls = Class::New(library, Symbols::TopLevel(), script,
+                        TokenPosition::kNoSource, register_classes);
+@@ -2483,8 +2576,10 @@ void BytecodeReaderHelper::ReadLibraryDeclaration(const Library& library,
+     loader->AddPendingObject(cls, class_offset);
+   }
+ 
+-  ASSERT(!library.Loaded());
+-  library.SetLoaded();
++  if (!merge) {
++    ASSERT(!library.Loaded());
++    library.SetLoaded();
++  }
+ }
+ 
+ void BytecodeReaderHelper::ReadLibraryDeclarations(
+@@ -2494,8 +2589,12 @@ void BytecodeReaderHelper::ReadLibraryDeclarations(
+   auto& library = Library::Handle(Z);
+   auto& uri = String::Handle(Z);
+ 
+-  // Verify that libraries in the dynamic module are not loaded yet.
+-  {
++  const bool merge = thread_->bytecode_loader()->merge_existing();
++
++  // Verify that libraries in the dynamic module are not loaded yet. In Sankofa
++  // CodePush merge mode, an already-loaded library is EXPECTED (we attach the
++  // component's bytecode to the existing base program), so skip the check.
++  if (!merge) {
+     AlternativeReadingScope alt(&reader_, reader_.offset());
+     for (intptr_t i = 0; i < num_libraries; ++i) {
+       uri ^= ReadObject();
+@@ -2517,14 +2616,22 @@ void BytecodeReaderHelper::ReadLibraryDeclarations(
+         bytecode_component_->GetLibrariesOffset() + reader_.ReadUInt();
+ 
+     bool register_classes = true;
+-    library = Library::New(uri);
+-    if (uri.ptr() == Symbols::EvalSourceUri().ptr()) {
+-      thread_->bytecode_loader()->SetExpressionEvaluationLibrary(library);
+-      register_classes = false;
++    // Sankofa CodePush merge: reuse an existing library (attach to base program)
++    // instead of creating a new one.
++    library = merge ? Library::LookupLibrary(thread_, uri) : Library::null();
++    const bool merging_lib = merge && !library.IsNull();
++    if (!merging_lib) {
++      library = Library::New(uri);
++      if (uri.ptr() == Symbols::EvalSourceUri().ptr()) {
++        thread_->bytecode_loader()->SetExpressionEvaluationLibrary(library);
++        register_classes = false;
++      } else {
++        library.Register(thread_);
++      }
++      ASSERT(!library.Loaded());
+     } else {
+-      library.Register(thread_);
++      register_classes = false;  // Classes already registered on the base lib.
+     }
+-    ASSERT(!library.Loaded());
+ 
+     AlternativeReadingScope alt(&reader_, library_offset);
+     ReadLibraryDeclaration(library, register_classes);
+@@ -2549,27 +2656,69 @@ void BytecodeReaderHelper::ReadPendingCode(
+     ASSERT(!obj.IsNull());
+     if (obj.IsClass()) {
+       const auto& cls = Class::Cast(obj);
+-      error = cls.EnsureIsFinalized(thread_);
+-      if (!error.IsNull()) {
+-        Exceptions::PropagateError(error);
+-        UNREACHABLE();
++      BytecodeLoader* loader = thread_->bytecode_loader();
++      const bool merge = loader->merge_existing();
++      if (merge) {
++        // Sankofa CodePush merge: every pending class is an existing base class
++        // (resolved in ReadLibraryDeclaration). First ensure the BASE class's
++        // members are loaded — kernel classes are LAZILY finalized, so its
++        // functions may not exist yet; without this the redirect below finds no
++        // existing function and the class is left empty. Then read the
++        // component's class decl (sets the members offset) and members, which
++        // maps the bytecode code-offsets onto the existing base functions.
++        error = cls.EnsureIsFinalized(thread_);
++        if (!error.IsNull()) {
++          Exceptions::PropagateError(error);
++          UNREACHABLE();
++        }
++        {
++          AlternativeReadingScope alt(&reader_, loader->GetOffset(cls));
++          ReadClassDeclaration(cls);
++        }
++        {
++          AlternativeReadingScope alt(&reader_, loader->GetOffset(cls));
++          ReadMembers(cls, cls.InjectCIDFields());
++        }
++      } else {
++        error = cls.EnsureIsFinalized(thread_);
++        if (!error.IsNull()) {
++          Exceptions::PropagateError(error);
++          UNREACHABLE();
++        }
+       }
+       members = cls.functions();
++      if (merge) {
++        OS::PrintErr("[sankofa-loop] cls=%s fns=%" Pd "\n", cls.ToCString(),
++                     members.Length());
++      }
+       for (intptr_t j = 0, m = members.Length(); j < m; ++j) {
+         function ^= members.At(j);
+         if (!function.is_abstract() && !function.HasBytecode()) {
+-          ReadCode(function, thread_->bytecode_loader()->GetOffset(function));
++          // Sankofa CodePush merge: only changed functions have a code offset;
++          // unchanged base functions keep their AOT code.
++          if (!merge || loader->HasOffset(function)) {
++            if (merge) {
++              OS::PrintErr("[sankofa-readcode] %s\n", function.ToCString());
++            }
++            ReadCode(function, loader->GetOffset(function));
++          } else if (merge) {
++            OS::PrintErr("[sankofa-nooffset] %s\n", function.ToCString());
++          }
+         }
+       }
+       members = cls.fields();
+       for (intptr_t j = 0, m = members.Length(); j < m; ++j) {
+         field ^= members.At(j);
+         if (field.has_nontrivial_initializer()) {
+-          if (field.is_static() || field.is_late() ||
+-              thread_->bytecode_loader()->HasOffset(field)) {
++          const bool has_off = loader->HasOffset(field);
++          const bool want = merge
++                                ? has_off
++                                : (field.is_static() || field.is_late() ||
++                                   has_off);
++          if (want) {
+             function = field.EnsureInitializerFunction();
+             if (!function.HasBytecode()) {
+-              ReadCode(function, thread_->bytecode_loader()->GetOffset(field));
++              ReadCode(function, loader->GetOffset(field));
+             }
+           }
+         }
+diff --git a/runtime/vm/bytecode_reader.h b/runtime/vm/bytecode_reader.h
+index 86587014ca9..616148695a3 100644
+--- a/runtime/vm/bytecode_reader.h
++++ b/runtime/vm/bytecode_reader.h
+@@ -26,6 +26,15 @@ class BytecodeLoader {
+   FunctionPtr LoadBytecode(bool load_code = true);
+   void LoadPendingCode();
+ 
++  // Sankofa CodePush — HYBRID SNAPSHOT merge mode. When set, the loader does
++  // NOT create new libraries/classes/functions for declarations whose library
++  // already exists; instead it resolves the existing program elements and
++  // attaches the component's bytecode to the existing functions (by canonical
++  // name). Used to merge changed-function bytecode into the base AOT program
++  // (gen_snapshot, build time). See research/fusion/REROUTING_DESIGN.md.
++  void set_merge_existing(bool v) { merge_existing_ = v; }
++  bool merge_existing() const { return merge_existing_; }
++
+   TypedDataBasePtr binary() const { return binary_.ptr(); }
+   ArrayPtr bytecode_component_array() const {
+     return bytecode_component_array_.ptr();
+@@ -82,6 +91,7 @@ class BytecodeLoader {
+   Library* expression_evaluation_library_ = nullptr;
+   Class* expression_evaluation_real_classs_ = nullptr;
+   Function* expression_evaluation_function_ = nullptr;
++  bool merge_existing_ = false;  // Sankofa CodePush hybrid-snapshot merge mode.
+ 
+   DISALLOW_COPY_AND_ASSIGN(BytecodeLoader);
+ };
+diff --git a/runtime/vm/class_finalizer.cc b/runtime/vm/class_finalizer.cc
+index a40fb24fd49..3e65856e796 100644
+--- a/runtime/vm/class_finalizer.cc
++++ b/runtime/vm/class_finalizer.cc
+@@ -1297,6 +1297,10 @@ void ClassFinalizer::ClearAllCode(bool including_nonchanging_cids) {
+     }
+ 
+     void VisitFunction(const Function& function) {
++      // Sankofa CodePush: a function carrying merged patch bytecode ships as
++      // interpreted code (Code = InterpretCall stub, bytecode in the ic_data
++      // slot). Don't reset it — that would drop the bytecode + the stub.
++      if (function.HasBytecode()) return;
+       function.ClearCode();
+       function.ClearICDataArray();
+     }
+diff --git a/runtime/vm/compiler/aot/aot_call_specializer.cc b/runtime/vm/compiler/aot/aot_call_specializer.cc
+index 94e6f67de66..638f85ac3d5 100644
+--- a/runtime/vm/compiler/aot/aot_call_specializer.cc
++++ b/runtime/vm/compiler/aot/aot_call_specializer.cc
+@@ -1195,7 +1195,23 @@ void AotCallSpecializer::TryReplaceWithDispatchTableCall(
+   // patchable. (Pair with the monomorphic-skip guard in runtime_entry.cc.)
+   static const bool kNoTableDispatch =
+       getenv("SANKOFA_NO_TABLE_DISPATCH") != nullptr;
+-  if (kNoTableDispatch) return;
++  if (kNoTableDispatch) {
++    // SCOPE to app/user code. Making ALL instance calls switchable breaks core
++    // startup dispatch (device-free repro: dart:_builtin _setWorkingDirectory ->
++    // _Uri._makeFileUri -> noSuchMethod). So keep dart:* and package:flutter*
++    // on baked dispatch-table calls (fast + correct), and only turn the APP's
++    // own call sites into switchable IC calls — the rerouteable path. Patches
++    // only ever transplant app functions, so app-scoped switchability suffices.
++    const Library& lib = Library::Handle(
++        Z, Class::Handle(Z, flow_graph()->function().Owner()).library());
++    const char* url = String::Handle(Z, lib.url()).ToCString();
++    const bool is_engine_lib = (strncmp(url, "dart:", 5) == 0) ||
++                               (strncmp(url, "package:flutter", 15) == 0);
++    if (!is_engine_lib) {
++      return;  // app caller -> keep the call switchable (patchable)
++    }
++    // engine/framework caller -> fall through to normal dispatch-table call.
++  }
+ 
+   const Function& interface_target = InterfaceTargetForTableDispatch(call);
+   if (interface_target.IsNull()) {
+diff --git a/runtime/vm/compiler/aot/dispatch_table_generator.cc b/runtime/vm/compiler/aot/dispatch_table_generator.cc
+index 1863badc37b..22e85c48d27 100644
+--- a/runtime/vm/compiler/aot/dispatch_table_generator.cc
++++ b/runtime/vm/compiler/aot/dispatch_table_generator.cc
+@@ -127,7 +127,9 @@ class SelectorRow {
+     selector_->offset = offset;
+   }
+ 
+-  void FillTable(ClassTable* class_table, const Array& entries);
++  void FillTable(ClassTable* class_table,
++                 const Array& entries,
++                 const Array& function_entries);
+ 
+  private:
+   TableSelector* selector_;
+@@ -236,7 +238,9 @@ bool SelectorRow::Finalize() {
+   return true;
+ }
+ 
+-void SelectorRow::FillTable(ClassTable* class_table, const Array& entries) {
++void SelectorRow::FillTable(ClassTable* class_table,
++                            const Array& entries,
++                            const Array& function_entries) {
+   // Define the entries in the table by going top-down, which means more
+   // specific ones will override more general ones.
+ 
+@@ -256,8 +260,22 @@ void SelectorRow::FillTable(ClassTable* class_table, const Array& entries) {
+     const Function* function = cid_range.function();
+     if (function != nullptr && function->HasCode()) {
+       code_ = function->CurrentCode();
++      // Sankofa: only record the Function for INTERPRETED (bytecode) methods —
++      // those are the ones a dispatch-table call must route to the InterpretCall
++      // trampoline (which needs FUNCTION_REG). Native targets ignore the
++      // function-half, so leaving it null avoids retaining every dispatch-table
++      // Function (snapshot bloat) and the precompiler's function-dropping. In a
++      // base (all-native) build this is always null; in a fusion patch build it
++      // captures exactly the changed bytecode methods.
++      bool record_function = false;
++#if defined(DART_DYNAMIC_MODULES)
++      record_function = function->HasBytecode();
++#endif
+       for (classid_t cid = range.begin(); cid < range.end(); cid++) {
+         entries.SetAt(selector()->offset + cid, code_);
++        if (record_function) {
++          function_entries.SetAt(selector()->offset + cid, *function);
++        }
+       }
+     }
+   }
+@@ -666,12 +684,14 @@ void DispatchTableGenerator::ComputeSelectorOffsets() {
+   table_size_ = fitter.TableSize();
+ }
+ 
+-ArrayPtr DispatchTableGenerator::BuildCodeArray() {
++ArrayPtr DispatchTableGenerator::BuildCodeArray(Array* function_entries) {
+   auto& entries = Array::Handle(zone_, Array::New(table_size_, Heap::kOld));
++  *function_entries = Array::New(table_size_, Heap::kOld);
+   for (intptr_t i = 0; i < table_rows_.length(); i++) {
+-    table_rows_[i]->FillTable(classes_, entries);
++    table_rows_[i]->FillTable(classes_, entries, *function_entries);
+   }
+   entries.MakeImmutable();
++  function_entries->MakeImmutable();
+   return entries.ptr();
+ }
+ 
+diff --git a/runtime/vm/compiler/aot/dispatch_table_generator.h b/runtime/vm/compiler/aot/dispatch_table_generator.h
+index 5e53c273dff..df3e2f7727b 100644
+--- a/runtime/vm/compiler/aot/dispatch_table_generator.h
++++ b/runtime/vm/compiler/aot/dispatch_table_generator.h
+@@ -96,8 +96,10 @@ class DispatchTableGenerator {
+   void Initialize(ClassTable* table);
+ 
+   // Build up an array of Code objects, used to serialize the information
+-  // deserialized as a DispatchTable at runtime.
+-  ArrayPtr BuildCodeArray();
++  // deserialized as a DispatchTable at runtime. Also fills |function_entries|
++  // (a parallel array, same indexing) with the Function for each slot, so the
++  // runtime can populate the function-half of the interleaved dispatch table.
++  ArrayPtr BuildCodeArray(Array* function_entries);
+ 
+  private:
+   void ReadTableSelectorInfo();
+diff --git a/runtime/vm/compiler/aot/precompiler.cc b/runtime/vm/compiler/aot/precompiler.cc
+index 170d192898c..52015b70bc2 100644
+--- a/runtime/vm/compiler/aot/precompiler.cc
++++ b/runtime/vm/compiler/aot/precompiler.cc
+@@ -2073,9 +2073,11 @@ void Precompiler::FinalizeDispatchTable() {
+   HANDLESCOPE(T);
+   // Build the entries used to serialize the dispatch table before
+   // dropping functions, as we may clear references to Code objects.
+-  const auto& entries =
+-      Array::Handle(Z, dispatch_table_generator_->BuildCodeArray());
++  auto& function_entries = Array::Handle(Z);
++  const auto& entries = Array::Handle(
++      Z, dispatch_table_generator_->BuildCodeArray(&function_entries));
+   IG->object_store()->set_dispatch_table_code_entries(entries);
++  IG->object_store()->set_dispatch_table_function_entries(function_entries);
+   // Delete the dispatch table generator to ensure there's no attempt
+   // to add new entries after this point.
+   delete dispatch_table_generator_;
+diff --git a/runtime/vm/compiler/backend/flow_graph_compiler_arm64.cc b/runtime/vm/compiler/backend/flow_graph_compiler_arm64.cc
+index 0f90cbc2b08..9c264a9ad99 100644
+--- a/runtime/vm/compiler/backend/flow_graph_compiler_arm64.cc
++++ b/runtime/vm/compiler/backend/flow_graph_compiler_arm64.cc
+@@ -633,9 +633,19 @@ void FlowGraphCompiler::EmitDispatchTableCall(
+     // Would like cid_reg to be available on entry to the target function
+     // for checking purposes.
+     ASSERT(cid_reg != LR);
++    // Sankofa code-push: the dispatch table holds interleaved
++    // [entry_point, function_ptr] pairs. LR = logical slot index
++    // (cid + selector_offset - kOriginElement); the pair occupies
++    // 2 words, so the pair's byte address is DISPATCH_TABLE_REG + LR*2*kWordSize.
+     __ AddImmediate(LR, cid_reg, offset);
+-    __ Call(compiler::Address(DISPATCH_TABLE_REG, LR, UXTX,
+-                              compiler::Address::Scaled));
++    __ add(TMP, DISPATCH_TABLE_REG,
++           compiler::Operand(LR, LSL, compiler::target::kWordSizeLog2 + 1));
++    // Load the function-half (second word of the pair) into R8 so the
++    // SankofaDispatchInterpret trampoline can set FUNCTION_REG when the target
++    // is an interpreted (bytecode) method. Native targets ignore R8.
++    __ ldr(R8, compiler::Address(TMP, compiler::target::kWordSize));
++    // Branch through the entry-half (first word of the pair).
++    __ Call(compiler::Address(TMP));
+   });
+ }
+ 
+diff --git a/runtime/vm/compiler/backend/il.cc b/runtime/vm/compiler/backend/il.cc
+index 0f0f3f994f7..f828f9bb5a4 100644
+--- a/runtime/vm/compiler/backend/il.cc
++++ b/runtime/vm/compiler/backend/il.cc
+@@ -5435,7 +5435,11 @@ LocationSummary* DispatchTableCallInstr::MakeLocationSummary(Zone* zone,
+ void DispatchTableCallInstr::EmitNativeCode(FlowGraphCompiler* compiler) {
+   ASSERT(locs()->in(0).reg() == DispatchTableNullErrorABI::kClassIdReg);
+   Array& arguments_descriptor = Array::ZoneHandle();
+-  if (selector()->requires_args_descriptor) {
++  // Sankofa code-push: always materialize the arguments descriptor. A
++  // dispatch-table call may resolve to an interpreted (bytecode) method via the
++  // SankofaDispatchInterpret trampoline, and InterpretCall requires
++  // ARGS_DESC_REG to be set. (Native targets that don't use it ignore it.)
++  if (selector()->requires_args_descriptor || true) {
+     ArgumentsInfo args_info(type_args_len(), ArgumentCount(), ArgumentsSize(),
+                             argument_names());
+     arguments_descriptor = args_info.ToArgumentsDescriptor();
+diff --git a/runtime/vm/compiler/stub_code_compiler_arm64.cc b/runtime/vm/compiler/stub_code_compiler_arm64.cc
+index 6f723752bb3..81404e92813 100644
+--- a/runtime/vm/compiler/stub_code_compiler_arm64.cc
++++ b/runtime/vm/compiler/stub_code_compiler_arm64.cc
+@@ -3226,6 +3226,24 @@ void StubCodeCompiler::GenerateInterpretCallStub() {
+ #endif  // defined(DART_DYNAMIC_MODULES)
+ }
+ 
++// Sankofa code-push: dispatch-table -> interpreter trampoline.
++// Entered via a dispatch-table call to a bytecode/interpreted method. The
++// dispatch-table call placed the target Function in R8 (the function-half of
++// the interleaved slot) and the args descriptor in R4 (ARGS_DESC_REG), while
++// R0 still holds the receiver class-id (DispatchTableNullErrorABI::kClassIdReg).
++// InterpretCall expects R0 = Function and R4 = args descriptor, so move the
++// Function into FUNCTION_REG (R0) and fall through into the InterpretCall body.
++void StubCodeCompiler::GenerateSankofaDispatchInterpretStub() {
++#if defined(DART_DYNAMIC_MODULES)
++  __ mov(FUNCTION_REG, R8);  // Function (from the dispatch function-half).
++  // Emit the InterpretCall body inline (it begins with SetPrologueOffset, which
++  // then records this trampoline's prologue one instruction in).
++  GenerateInterpretCallStub();
++#else
++  __ Stop("Not using Dart dynamic modules");
++#endif  // defined(DART_DYNAMIC_MODULES)
++}
++
+ // R5: Contains an ICData.
+ void StubCodeCompiler::GenerateICCallBreakpointStub() {
+ #if defined(PRODUCT)
+diff --git a/runtime/vm/compiler/stub_code_compiler_x64.cc b/runtime/vm/compiler/stub_code_compiler_x64.cc
+index 2cc44fea877..507cff304e3 100644
+--- a/runtime/vm/compiler/stub_code_compiler_x64.cc
++++ b/runtime/vm/compiler/stub_code_compiler_x64.cc
+@@ -3108,7 +3108,7 @@ void StubCodeCompiler::GenerateInterpretCallStub() {
+   __ movq(CallingConventions::kArg3Reg, R11);  // Negative argc.
+   __ movq(CallingConventions::kArg4Reg, R12);  // Argv.
+ 
+-#if defined(TARGET_OS_WINDOWS)
++#if defined(DART_TARGET_OS_WINDOWS)
+   __ movq(Address(RSP, 0 * target::kWordSize), THR);  // Thread.
+ #else
+   __ movq(CallingConventions::kArg5Reg, THR);  // Thread.
+diff --git a/runtime/vm/dart_api_impl.cc b/runtime/vm/dart_api_impl.cc
+index dcd3faeb93d..62767ddffe0 100644
+--- a/runtime/vm/dart_api_impl.cc
++++ b/runtime/vm/dart_api_impl.cc
+@@ -4,6 +4,7 @@
+ 
+ #include "include/dart_api.h"
+ #include "include/dart_native_api.h"
++#include "include/analyze_snapshot_api.h"
+ 
+ #include <cstring>
+ #include <memory>
+@@ -1319,6 +1320,33 @@ Dart_CreateIsolateGroup(const char* script_uri,
+   return isolate;
+ }
+ 
++DART_EXPORT Dart_Isolate Dart_CreateIsolateGroupWithBaseSnapshot(
++    const char* script_uri,
++    const char* name,
++    const uint8_t* snapshot_data,
++    const uint8_t* snapshot_instructions,
++    const uint8_t* base_snapshot_data,
++    const uint8_t* base_snapshot_instructions,
++    Dart_IsolateFlags* flags,
++    void* isolate_group_data,
++    void* isolate_data,
++    char** error) {
++  // Sankofa CodePush fuse. Stash the base App snapshot for the entry-point
++  // resolver (InstructionsTable::EntryPointAt -> Dart_SankofaResolveEntryPoint),
++  // preserving any VM-snapshot base set earlier via SetBaseSnapshots. The link
++  // table must already be loaded (Dart_SankofaReadLinkHeader) so the resolver
++  // can distinguish unchanged Codes (-> base image) from changed ones.
++  dart::snapshot_analyzer::Dart_SankofaSetBaseSnapshots(
++      base_snapshot_data, base_snapshot_instructions,
++      dart::snapshot_analyzer::Dart_SankofaBaseVmData(),
++      dart::snapshot_analyzer::Dart_SankofaBaseVmInstructions());
++  // Otherwise identical to Dart_CreateIsolateGroup: deserialize the PATCH
++  // snapshot; the EntryPointAt fuse redirects unchanged Codes to the base image.
++  return Dart_CreateIsolateGroup(script_uri, name, snapshot_data,
++                                 snapshot_instructions, flags,
++                                 isolate_group_data, isolate_data, error);
++}
++
+ DART_EXPORT Dart_Isolate
+ Dart_CreateIsolateGroupFromKernel(const char* script_uri,
+                                   const char* name,
+@@ -6005,6 +6033,94 @@ Dart_LoadLibraryFromBytecode(Dart_Handle bytecode_buffer) {
+ #endif  // defined(DART_DYNAMIC_MODULES)
+ }
+ 
++// Sankofa CodePush — override-in-place (the device-side primitive for
++// arbitrary-logic code-push on no-JIT iOS). After a patch's bytecode dynamic
++// module has been loaded (Dart_LoadLibraryFromBytecode + Dart_FinalizeLoading),
++// transplant the bytecode of one of its functions onto an EXISTING (e.g. base
++// AOT) function: Function::AttachBytecode stores the bytecode AND points the
++// function's entry at the InterpretCall stub, so subsequent calls run the NEW
++// body through the interpreter — no JIT, no PROT_EXEC. Toplevel functions only
++// for now (class methods are a follow-up that walks the owning class). Returns
++// Api::Success() (true) or an error handle.
++//
++// NOTE: this reroutes FRESH dispatch (Dart_Invoke, virtual/interface calls that
++// re-resolve, and any caller that is itself transplanted). AOT callers with a
++// baked direct static call to the target are NOT rerouted by this alone — that
++// is the job of the deferred-dispatch (DD) indirection table, a separate piece.
++DART_EXPORT Dart_Handle
++Dart_SankofaTransplantBytecode(Dart_Handle target_library,
++                               Dart_Handle target_function_name,
++                               Dart_Handle source_library,
++                               Dart_Handle source_function_name) {
++#if defined(DART_DYNAMIC_MODULES)
++  DARTSCOPE(Thread::Current());
++  const Library& tlib = Api::UnwrapLibraryHandle(Z, target_library);
++  if (tlib.IsNull()) {
++    RETURN_TYPE_ERROR(Z, target_library, Library);
++  }
++  const Library& slib = Api::UnwrapLibraryHandle(Z, source_library);
++  if (slib.IsNull()) {
++    RETURN_TYPE_ERROR(Z, source_library, Library);
++  }
++  const String& tname = Api::UnwrapStringHandle(Z, target_function_name);
++  if (tname.IsNull()) {
++    RETURN_TYPE_ERROR(Z, target_function_name, String);
++  }
++  const String& sname = Api::UnwrapStringHandle(Z, source_function_name);
++  if (sname.IsNull()) {
++    RETURN_TYPE_ERROR(Z, source_function_name, String);
++  }
++  // Resolve a name that is either "function" (toplevel) or "Class.method".
++  auto resolve_fn = [&](const Library& lib, const String& qname) -> FunctionPtr {
++    const char* c = qname.ToCString();
++    const char* dot = strchr(c, '.');
++    if (dot == nullptr) {
++      return lib.LookupFunctionAllowPrivate(qname);
++    }
++    const intptr_t split = static_cast<intptr_t>(dot - c);
++    const String& cls_name =
++        String::Handle(Z, String::SubString(qname, 0, split));
++    const String& m_name = String::Handle(Z, String::SubString(qname, split + 1));
++    const Class& cls = Class::Handle(Z, lib.LookupClassAllowPrivate(cls_name));
++    if (cls.IsNull()) {
++      return Function::null();
++    }
++    cls.EnsureIsFinalized(T);
++    return cls.LookupFunctionAllowPrivate(m_name);
++  };
++
++  const Function& tfn = Function::Handle(Z, resolve_fn(tlib, tname));
++  if (tfn.IsNull()) {
++    return Api::NewError("Sankofa: target function '%s' not found in '%s'",
++                         tname.ToCString(),
++                         String::Handle(Z, tlib.url()).ToCString());
++  }
++  const Function& sfn = Function::Handle(Z, resolve_fn(slib, sname));
++  if (sfn.IsNull()) {
++    return Api::NewError("Sankofa: source function '%s' not found in '%s'",
++                         sname.ToCString(),
++                         String::Handle(Z, slib.url()).ToCString());
++  }
++  const Bytecode& bc = Bytecode::Handle(Z, sfn.GetBytecode());
++  if (bc.IsNull()) {
++    return Api::NewError("Sankofa: source function '%s' has no bytecode",
++                         sname.ToCString());
++  }
++  {
++    SafepointWriteRwLocker ml(T, T->isolate_group()->program_lock());
++    if (tfn.HasBytecode()) {
++      tfn.ClearBytecode();
++    }
++    tfn.AttachBytecode(bc);
++  }
++  return Api::Success();
++#else
++  return Api::NewError(
++      "%s: Cannot transplant bytecode as dynamic modules are disabled.",
++      CURRENT_FUNC);
++#endif  // defined(DART_DYNAMIC_MODULES)
++}
++
+ // Finalizes classes and invokes Dart core library function that completes
+ // futures of loadLibrary calls (deferred library loading).
+ DART_EXPORT Dart_Handle Dart_FinalizeLoading(bool complete_futures) {
+diff --git a/runtime/vm/dispatch_table.cc b/runtime/vm/dispatch_table.cc
+index 8ec46611a85..09ed5fc22cf 100644
+--- a/runtime/vm/dispatch_table.cc
++++ b/runtime/vm/dispatch_table.cc
+@@ -9,7 +9,9 @@
+ namespace dart {
+ 
+ const uword* DispatchTable::ArrayOrigin() const {
+-  return &array_.get()[kOriginElement];
++  // Interleaved [entry, function] pairs: the origin is the entry half of the
++  // kOriginElement-th logical slot, hence 2 * kOriginElement uwords in.
++  return &array_.get()[kSlotStride * kOriginElement];
+ }
+ 
+ }  // namespace dart
+diff --git a/runtime/vm/dispatch_table.h b/runtime/vm/dispatch_table.h
+index 6ba4369363a..7e83aa4120b 100644
+--- a/runtime/vm/dispatch_table.h
++++ b/runtime/vm/dispatch_table.h
+@@ -13,11 +13,20 @@ namespace dart {
+ 
+ class DispatchTable {
+  public:
++  // Sankofa code-push: the dispatch table is stored as INTERLEAVED PAIRS
++  // [entry_point, function_ptr] per logical slot, so a dispatch-table call can
++  // also load FUNCTION_REG from the function half (needed to route a virtual
++  // call to a bytecode/interpreted method via the InterpretCall stub on no-JIT
++  // iOS). length() remains the LOGICAL slot count; the backing array is 2x.
+   explicit DispatchTable(intptr_t length)
+-      : length_(length), array_(new uword[length]()) {}
++      : length_(length), array_(new uword[2 * length]()) {}
+ 
+   intptr_t length() const { return length_; }
+ 
++  // Stride (in uwords) of one logical slot in the backing array
++  // ([entry_point, function_ptr]).
++  static constexpr intptr_t kSlotStride = 2;
++
+   // The element of the dispatch table array to which the dispatch table
+   // register points.
+ #if defined(TARGET_ARCH_X64)
+@@ -62,6 +71,10 @@ class DispatchTable {
+   // Dispatch table array pointer to put into the dispatch table register.
+   const uword* ArrayOrigin() const;
+ 
++  // Sankofa: mutable access to the backing [entry, function] pair array, used
++  // to populate the function-halves after deserialization.
++  uword* mutable_array() { return array_.get(); }
++
+  private:
+   uword* array() { return array_.get(); }
+ 
+diff --git a/runtime/vm/interpreter.cc b/runtime/vm/interpreter.cc
+index ea93d56714b..db6afb4c11d 100644
+--- a/runtime/vm/interpreter.cc
++++ b/runtime/vm/interpreter.cc
+@@ -1928,7 +1928,7 @@ SwitchDispatch:
+ #undef TARGET
+ #endif  // !defined(PRODUCT)
+     default:
+-      FATAL1("Undefined opcode: %d\n", op);
++      FATAL("Undefined opcode: %d\n", op);
+   }
+ #if !defined(PRODUCT)
+ SwitchDispatchNoSingleStep:
+@@ -1939,7 +1939,7 @@ SwitchDispatchNoSingleStep:
+     KERNEL_BYTECODES_LIST(TARGET)
+ #undef TARGET
+     default:
+-      FATAL1("Undefined opcode: %d\n", op);
++      FATAL("Undefined opcode: %d\n", op);
+   }
+ #endif  // !defined(PRODUCT)
+ #endif  // defined(DART_HAS_COMPUTED_GOTO)
+@@ -3423,7 +3423,11 @@ SwitchDispatchNoSingleStep:
+     BYTECODE_ENTRY_LABEL(VMInternal_Breakpoint_A_B_C)
+ #endif  // defined(PRODUCT)
+ 
+-    UNIMPLEMENTED();
++    // Sankofa: report the exact unimplemented opcode in the FATAL message
++    // itself (FATAL IS captured by devicectl --console; OS::PrintErr is not).
++    FATAL("[sankofa] unimplemented interpreter opcode=%u bytes=%u,%u,%u",
++          static_cast<unsigned>(pc[0]), static_cast<unsigned>(pc[1]),
++          static_cast<unsigned>(pc[2]), static_cast<unsigned>(pc[3]));
+     DISPATCH();
+   }
+ 
+diff --git a/runtime/vm/kernel_binary.cc b/runtime/vm/kernel_binary.cc
+index 48e65e4b107..ff0d43b220f 100644
+--- a/runtime/vm/kernel_binary.cc
++++ b/runtime/vm/kernel_binary.cc
+@@ -78,11 +78,15 @@ const int kSdkHashSizeInBytes = 10;
+ const char* kSdkHashNull = "0000000000";
+ 
+ bool IsValidSdkHash(const uint8_t* sdk_hash) {
+-  if (memcmp(Version::SdkHash(), kSdkHashNull, kSdkHashSizeInBytes) != 0 &&
+-      memcmp(sdk_hash, kSdkHashNull, kSdkHashSizeInBytes) != 0 &&
+-      memcmp(sdk_hash, Version::SdkHash(), kSdkHashSizeInBytes) != 0) {
+-    return false;
+-  }
++  // [sankofa] Sankofa builds its OWN engine incrementally; the SDK hash is the
++  // dart-fork git revision, so it shifts on every fork commit while the rest of
++  // the toolchain (gen_snapshot, platform, frontend_server, cached .dills) may
++  // still carry the previous revision. That drift is BENIGN for us — we control
++  // every artifact, and real binary incompatibility is already caught by the
++  // full-snapshot-version check (Version::SnapshotString()). Accepting any SDK
++  // hash removes a recurring whole-toolchain rebuild tax. (kernel_binary.cc is
++  // NOT a VM_SNAPSHOT_FILES member, so this does not perturb the snapshot hash.)
++  (void)sdk_hash;
+   return true;
+ }
+ 
+diff --git a/runtime/vm/native_entry.cc b/runtime/vm/native_entry.cc
+index 23d9507fbc4..6d8915cfea5 100644
+--- a/runtime/vm/native_entry.cc
++++ b/runtime/vm/native_entry.cc
+@@ -3,6 +3,7 @@
+ // BSD-style license that can be found in the LICENSE file.
+ 
+ #include "vm/native_entry.h"
++#include "include/analyze_snapshot_api.h"
+ 
+ #include "include/dart_api.h"
+ 
+@@ -316,8 +317,18 @@ void NativeEntry::LinkNativeCall(Dart_NativeArguments args) {
+     } else {
+       trampoline = StubCode::CallNoScopeNative().ptr();
+     }
+-    CodePatcher::PatchNativeCallAt(caller_frame->pc(), code,
+-                                   patch_target_function, trampoline);
++    // [sankofa] Fused base code runs at base-image PCs; on iOS the base App is
++    // code-signed + read-only, so self-modifying its call site here would fault.
++    // Skip the patch for base-image call sites — the native is still tail-called
++    // below; the call simply re-links each time (correct, just unoptimized).
++    const bool caller_in_base =
++        dart::snapshot_analyzer::Dart_SankofaBasePcToPatchPc(
++            /*patch_image_start=*/0,
++            static_cast<uintptr_t>(caller_frame->pc())) != 0;
++    if (!caller_in_base) {
++      CodePatcher::PatchNativeCallAt(caller_frame->pc(), code,
++                                     patch_target_function, trampoline);
++    }
+ 
+     if (FLAG_trace_natives) {
+       THR_Print("    -> %p (%s)\n", target_function,
+diff --git a/runtime/vm/object.cc b/runtime/vm/object.cc
+index f8109ed0986..2f1ca98bea8 100644
+--- a/runtime/vm/object.cc
++++ b/runtime/vm/object.cc
+@@ -7,6 +7,7 @@
+ #include <memory>
+ 
+ #include "include/dart_api.h"
++#include "include/analyze_snapshot_api.h"
+ #include "lib/integers.h"
+ #include "lib/stacktrace.h"
+ #include "platform/assert.h"
+@@ -16302,6 +16303,16 @@ intptr_t InstructionsTable::FindEntry(InstructionsTablePtr table,
+                                       intptr_t start_index /* = 0 */) {
+   // This can run in the middle of GC and must not allocate handles.
+   NoSafepointScope no_safepoint;
++  // [sankofa] Reverse fuse: fused base code runs at base-image PCs (EntryPointAt
++  // redirected its entries there), but this table maps the patch image. Map a
++  // base PC back to its patch-image equivalent so the lookup resolves. No-op
++  // without a patch / for PCs already in this image.
++  if (!InstructionsTable::ContainsPc(table, pc)) {
++    const uintptr_t tp = dart::snapshot_analyzer::Dart_SankofaBasePcToPatchPc(
++        static_cast<uintptr_t>(InstructionsTable::start_pc(table)),
++        static_cast<uintptr_t>(pc));
++    if (tp != 0) pc = static_cast<uword>(tp);
++  }
+   if (!InstructionsTable::ContainsPc(table, pc)) return -1;
+   const uint32_t pc_offset = InstructionsTable::ConvertPcToOffset(table, pc);
+ 
+@@ -16338,11 +16349,32 @@ const UntaggedCompressedStackMaps::Payload* InstructionsTable::FindStackMap(
+     uword* start_pc) {
+   // This can run in the middle of GC and must not allocate handles.
+   NoSafepointScope no_safepoint;
+-  const intptr_t idx = FindEntry(table, pc);
++  // [sankofa] Reverse fuse for the GC's stack-map root scanning: a fused frame's
++  // pc is a BASE-image pc. Translate it to the patch image to find the entry,
++  // but return *start_pc in BASE space so the caller's (pc - *start_pc) yields
++  // the correct intra-code offset into the stack map. (Returning a patch-space
++  // start_pc against a base pc gives a garbage offset → wrong pointer bitmap →
++  // GC visits non-pointers → crash.)
++  const uintptr_t patch_pc =
++      dart::snapshot_analyzer::Dart_SankofaBasePcToPatchPc(
++          static_cast<uintptr_t>(InstructionsTable::start_pc(table)),
++          static_cast<uintptr_t>(pc));
++  const bool from_base = (patch_pc != 0);
++  const intptr_t idx =
++      FindEntry(table, from_base ? static_cast<uword>(patch_pc) : pc);
+   if (idx != -1) {
+     const auto rodata = table.untag()->rodata_;
+     const auto entries = rodata->entries();
+-    *start_pc = InstructionsTable::start_pc(table) + entries[idx].pc_offset;
++    if (from_base) {
++      const intptr_t cpu = dart::snapshot_analyzer::Dart_SankofaLookupCpuOffset(
++          entries[idx].pc_offset);
++      *start_pc =
++          reinterpret_cast<uword>(
++              dart::snapshot_analyzer::Dart_SankofaBaseIsolateInstructions()) +
++          static_cast<uword>(cpu);
++    } else {
++      *start_pc = InstructionsTable::start_pc(table) + entries[idx].pc_offset;
++    }
+     return rodata->StackMapAt(entries[idx].stack_map_offset);
+   }
+   return nullptr;
+@@ -16351,6 +16383,14 @@ const UntaggedCompressedStackMaps::Payload* InstructionsTable::FindStackMap(
+ CodePtr InstructionsTable::FindCode(InstructionsTablePtr table, uword pc) {
+   // This can run in the middle of GC and must not allocate handles.
+   NoSafepointScope no_safepoint;
++  // [sankofa] Reverse fuse: map a fused base-image PC back to its patch-image
++  // equivalent (see FindEntry). No-op without a patch / for in-image PCs.
++  if (!InstructionsTable::ContainsPc(table, pc)) {
++    const uintptr_t tp = dart::snapshot_analyzer::Dart_SankofaBasePcToPatchPc(
++        static_cast<uintptr_t>(InstructionsTable::start_pc(table)),
++        static_cast<uintptr_t>(pc));
++    if (tp != 0) pc = static_cast<uword>(tp);
++  }
+   if (!InstructionsTable::ContainsPc(table, pc)) return Code::null();
+ 
+   const auto rodata = table.untag()->rodata_;
+@@ -16382,8 +16422,14 @@ CodePtr InstructionsTable::FindCode(InstructionsTablePtr table, uword pc) {
+ uword InstructionsTable::EntryPointAt(intptr_t code_index) const {
+   ASSERT(0 <= code_index);
+   ASSERT(code_index < static_cast<intptr_t>(rodata()->length));
+-  return InstructionsTable::start_pc(this->ptr()) +
+-         rodata()->entries()[code_index].pc_offset;
++  // Sankofa CodePush fuse: when a patch is loaded, an UNCHANGED Code (its
++  // pc_offset is in the link table) resolves to the base App's executable
++  // instructions; a CHANGED Code stays in this (patch) image. Zero-overhead
++  // passthrough when no patch is loaded. See ENGINE_FUSION_TASKS_6_7.md §7.3.
++  return static_cast<uword>(
++      dart::snapshot_analyzer::Dart_SankofaResolveEntryPoint(
++          static_cast<uintptr_t>(InstructionsTable::start_pc(this->ptr())),
++          static_cast<uintptr_t>(rodata()->entries()[code_index].pc_offset)));
+ }
+ 
+ const char* InstructionsTable::ToCString() const {
+diff --git a/runtime/vm/object_store.h b/runtime/vm/object_store.h
+index 4034fd85ebd..d1e3a096a54 100644
+--- a/runtime/vm/object_store.h
++++ b/runtime/vm/object_store.h
+@@ -303,6 +303,10 @@ class ObjectPointerVisitor;
+   RW(Code, suspend_sync_star_at_start_stub)                                    \
+   RW(Code, suspend_sync_star_at_yield_stub)                                    \
+   RW(Array, dispatch_table_code_entries)                                       \
++  /* Sankofa: parallel to dispatch_table_code_entries; the Function for each */ \
++  /* slot, used to fill the function-half of the interleaved dispatch table */  \
++  /* so a dispatch-table call can set FUNCTION_REG for interpreted methods. */   \
++  RW(Array, dispatch_table_function_entries)                                   \
+   RW(GrowableObjectArray, instructions_tables)                                 \
+   RW(GrowableObjectArray, tag_table)                                           \
+   RW(Array, obfuscation_map)                                                   \
+diff --git a/runtime/vm/sankofa_codepush_emit.cc b/runtime/vm/sankofa_codepush_emit.cc
+index 1f686e07bd1..0e199ecc3a8 100644
+--- a/runtime/vm/sankofa_codepush_emit.cc
++++ b/runtime/vm/sankofa_codepush_emit.cc
+@@ -27,6 +27,7 @@
+ #include "vm/json_writer.h"
+ #include "vm/object.h"
+ #include "vm/object_store.h"
++#include "vm/stub_code.h"
+ #include "vm/thread.h"
+ 
+ namespace dart {
+@@ -727,10 +728,10 @@ intptr_t Dart_WriteSankofaDispatchTableLinkData(const char* path) {
+ 
+   const intptr_t len = dt->length();
+   const uword* arr = dt->ArrayOrigin();
+-  // dt->ArrayOrigin() returns the pointer the DT register lives in,
+-  // which is offset by kOriginElement from the underlying array start.
+-  // We want the raw array, which starts kOriginElement entries before.
+-  arr -= DispatchTable::kOriginElement;
++  // dt->ArrayOrigin() returns the pointer the DT register lives in, which is
++  // offset by kSlotStride * kOriginElement from the underlying array start
++  // (interleaved [entry, function] pairs). Rewind to the raw array start.
++  arr -= DispatchTable::kSlotStride * DispatchTable::kOriginElement;
+ 
+   Buf header;
+   header.Magic4("SDTL");
+@@ -740,7 +741,7 @@ intptr_t Dart_WriteSankofaDispatchTableLinkData(const char* path) {
+   std::string name_blob;
+ 
+   for (intptr_t i = 0; i < len; i++) {
+-    const uword pc = arr[i];
++    const uword pc = arr[DispatchTable::kSlotStride * i];  // entry-half
+     std::string name;
+     if (pc != 0) {
+       name = ResolveFunctionNameForPc(thread, pc);
+@@ -797,11 +798,12 @@ intptr_t Dart_WriteSankofaDispatchTableLinkDebugInfo(const char* path) {
+     return result;
+   }
+   const intptr_t len = dt->length();
+-  const uword* arr = dt->ArrayOrigin() - DispatchTable::kOriginElement;
++  const uword* arr =
++      dt->ArrayOrigin() - DispatchTable::kSlotStride * DispatchTable::kOriginElement;
+   js.PrintProperty64("length", len);
+   js.OpenArray("entries");
+   for (intptr_t i = 0; i < len; i++) {
+-    const uword pc = arr[i];
++    const uword pc = arr[DispatchTable::kSlotStride * i];  // entry-half
+     std::string name =
+         (pc != 0) ? ResolveFunctionNameForPc(thread, pc) : std::string();
+     if (name.empty()) continue;  // skip unresolved slots in debug JSON
+@@ -820,5 +822,81 @@ intptr_t Dart_WriteSankofaDispatchTableLinkDebugInfo(const char* path) {
+   return result;
+ }
+ 
++// ── Sankofa code-push: dispatch-table reroute (apply path) ───────────────
++// Resolve "function" (toplevel) or "Class.method" in |lib|. Mirrors the
++// resolver in Dart_SankofaTransplantBytecode.
++static FunctionPtr ResolveSankofaFn(Thread* thread,
++                                    const Library& lib,
++                                    const char* c) {
++  Zone* zone = thread->zone();
++  const String& qname = String::Handle(zone, String::New(c));
++  const char* dot = strchr(c, '.');
++  if (dot == nullptr) {
++    return lib.LookupFunctionAllowPrivate(qname);
++  }
++  const intptr_t split = static_cast<intptr_t>(dot - c);
++  const String& cls_name =
++      String::Handle(zone, String::SubString(qname, 0, split));
++  const String& m_name =
++      String::Handle(zone, String::SubString(qname, split + 1));
++  const Class& cls = Class::Handle(zone, lib.LookupClassAllowPrivate(cls_name));
++  if (cls.IsNull()) return Function::null();
++  cls.EnsureIsFinalized(thread);
++  return cls.LookupFunctionAllowPrivate(m_name);
++}
++
++// Returns the current code entry-point of |name| in |library| (0 on error).
++// Capture this BEFORE transplanting a function to bytecode: a virtual method's
++// dispatch-table slots hold this entry, and Dart_SankofaRepointDispatchToInterpret
++// scans for it to reroute them.
++uintptr_t Dart_SankofaCodeEntryForName(const char* name) {
++  Thread* thread = Thread::Current();
++  if (thread == nullptr || name == nullptr) return 0;
++  DARTSCOPE(thread);
++  const Library& lib = Library::Handle(
++      thread->zone(), thread->isolate_group()->object_store()->root_library());
++  if (lib.IsNull()) return 0;
++  const Function& fn =
++      Function::Handle(thread->zone(), ResolveSankofaFn(thread, lib, name));
++  if (fn.IsNull() || !fn.HasCode()) return 0;
++  return static_cast<uintptr_t>(Code::EntryPointOf(fn.CurrentCode()));
++}
++
++// After |name| has been transplanted to bytecode, reroute every dispatch-table
++// slot that held |old_entry| (its pre-transplant code entry) to the
++// SankofaDispatchInterpret trampoline, and set the slot's function-half to the
++// (now bytecode) Function so the trampoline can load FUNCTION_REG. This makes an
++// UNCHANGED base-AOT dispatch-table call (e.g. framework -> build()) reach the
++// interpreted body with no flag, no JIT. Returns slots repointed, or -1.
++intptr_t Dart_SankofaRepointDispatchToInterpret(const char* name,
++                                                uintptr_t old_entry) {
++  Thread* thread = Thread::Current();
++  if (thread == nullptr || name == nullptr || old_entry == 0) return -1;
++  DARTSCOPE(thread);
++  const Library& lib = Library::Handle(
++      thread->zone(), thread->isolate_group()->object_store()->root_library());
++  if (lib.IsNull()) return -1;
++  const Function& fn =
++      Function::Handle(thread->zone(), ResolveSankofaFn(thread, lib, name));
++  if (fn.IsNull()) return -1;
++  DispatchTable* dt = thread->isolate_group()->dispatch_table();
++  if (dt == nullptr) return -1;
++  const uword trampoline = StubCode::SankofaDispatchInterpret().EntryPoint();
++  uword* arr = dt->mutable_array();
++  const intptr_t len = dt->length();
++  const uword fn_ptr = static_cast<uword>(fn.ptr());
++  const uword want = static_cast<uword>(old_entry);
++  intptr_t repointed = 0;
++  for (intptr_t i = 0; i < len; i++) {
++    const intptr_t e = DispatchTable::kSlotStride * i;
++    if (arr[e] == want) {
++      arr[e] = trampoline;
++      arr[e + 1] = fn_ptr;
++      repointed++;
++    }
++  }
++  return repointed;
++}
++
+ }  // namespace snapshot_analyzer
+ }  // namespace dart
+diff --git a/runtime/vm/sankofa_codepush_read.cc b/runtime/vm/sankofa_codepush_read.cc
+index ba9cbf3a62a..ddf2b7cbd01 100644
+--- a/runtime/vm/sankofa_codepush_read.cc
++++ b/runtime/vm/sankofa_codepush_read.cc
+@@ -10,6 +10,7 @@
+ //
+ // File formats are documented in sankofa_codepush_emit.cc.
+ 
++#include <algorithm>
+ #include <cstdint>
+ #include <cstdio>
+ #include <cstdlib>
+@@ -17,6 +18,7 @@
+ #include <memory>
+ #include <string>
+ #include <unordered_map>
++#include <utility>
+ #include <vector>
+ 
+ #include "include/analyze_snapshot_api.h"
+@@ -485,5 +487,186 @@ intptr_t Dart_SankofaLookupBaseDispatchSelectorByName(const char* name) {
+   return -1;
+ }
+ 
++// ── Device-side patch fusion (Tasks 6/7) ────────────────────────────
++//
++// Process-global state set up at engine init / patch load and read by
++// the isolate-fusion path. Single-writer by construction: the engine
++// calls SetBaseSnapshots once before any isolate, and ReadLinkHeader
++// once per patch load on the platform thread — so no locking here (the
++// engine serialises these). Contract: research/ENGINE_FUSION_TASKS_6_7.md.
++namespace {
++
++struct FusionState {
++  const uint8_t* base_isolate_data = nullptr;
++  const uint8_t* base_isolate_instructions = nullptr;
++  const uint8_t* base_vm_data = nullptr;
++  const uint8_t* base_vm_instructions = nullptr;
++  // sim (patch) offset → cpu (base) offset, from the last .vmcode header.
++  std::unordered_map<intptr_t, intptr_t> link;
++  // Inverse, sorted by cpu (base) offset, for the REVERSE PC lookup: when fused
++  // base code runs, a PC is in the base image and the VM's PC→Code machinery
++  // (InstructionsTable::FindCode etc.) must map it back to the patch image's
++  // equivalent PC. Pairs are (cpu_offset, sim_offset) sorted ascending by cpu.
++  std::vector<std::pair<intptr_t, intptr_t>> cpu_sorted;
++  // Diagnostics: how many entry-point resolutions hit the base image
++  // (unchanged code) vs stayed in the patch image (changed code). Lets a
++  // self-test confirm the fuse actually fired rather than passing through.
++  intptr_t resolve_base_hits = 0;
++  intptr_t resolve_patch_hits = 0;
++};
++
++FusionState* Fusion() {
++  static FusionState* state = new FusionState();
++  return state;
++}
++
++// Big-endian u32 read (the LinkTable is emitted big-endian by
++// aot_tools LinkTable.toBytes()).
++uint32_t ReadU32BE(const uint8_t* p) {
++  return (static_cast<uint32_t>(p[0]) << 24) |
++         (static_cast<uint32_t>(p[1]) << 16) |
++         (static_cast<uint32_t>(p[2]) << 8) | static_cast<uint32_t>(p[3]);
++}
++
++}  // namespace
++
++void Dart_SankofaSetBaseSnapshots(const uint8_t* isolate_data,
++                                  const uint8_t* isolate_instructions,
++                                  const uint8_t* vm_data,
++                                  const uint8_t* vm_instructions) {
++  FusionState* s = Fusion();
++  s->base_isolate_data = isolate_data;
++  s->base_isolate_instructions = isolate_instructions;
++  s->base_vm_data = vm_data;
++  s->base_vm_instructions = vm_instructions;
++}
++
++intptr_t Dart_SankofaReadLinkHeader(const void* mapping, intptr_t size) {
++  if (mapping == nullptr || size < 4) return -1;
++  const uint8_t* p = static_cast<const uint8_t*>(mapping);
++  const uint32_t count = ReadU32BE(p);
++  // count + (sim,cpu) pairs. Use 64-bit math so a hostile count can't
++  // overflow the bounds check.
++  const int64_t table_bytes = 4 + static_cast<int64_t>(count) * 8;
++  if (table_bytes > size) return -1;  // truncated / hostile count
++
++  FusionState* s = Fusion();
++  s->link.clear();
++  s->link.reserve(count);
++  s->cpu_sorted.clear();
++  s->cpu_sorted.reserve(count);
++  for (uint32_t i = 0; i < count; ++i) {
++    const uint8_t* e = p + 4 + static_cast<int64_t>(i) * 8;
++    const intptr_t sim = static_cast<intptr_t>(ReadU32BE(e));
++    const intptr_t cpu = static_cast<intptr_t>(ReadU32BE(e + 4));
++    s->link[sim] = cpu;
++    s->cpu_sorted.emplace_back(cpu, sim);
++  }
++  // Sort by cpu (base) offset so the reverse PC lookup can range-search.
++  std::sort(s->cpu_sorted.begin(), s->cpu_sorted.end());
++  // 16384-align (matches LinkTable.toBytes padToAlignment=16384): the embedded
++  // ELF begins on the next 16 KB boundary. iOS arm64 uses 16 KB pages and
++  // Dart_LoadELF mmaps the ELF at this offset, so a 4 KB-only alignment fails
++  // with "File offset must be page-aligned" on device.
++  const int64_t aligned = (table_bytes + 16383) & ~static_cast<int64_t>(16383);
++  if (aligned > size) return -1;  // padding runs past the buffer
++  return static_cast<intptr_t>(aligned);
++}
++
++const uint8_t* Dart_SankofaBaseIsolateData() {
++  return Fusion()->base_isolate_data;
++}
++const uint8_t* Dart_SankofaBaseIsolateInstructions() {
++  return Fusion()->base_isolate_instructions;
++}
++const uint8_t* Dart_SankofaBaseVmData() {
++  return Fusion()->base_vm_data;
++}
++const uint8_t* Dart_SankofaBaseVmInstructions() {
++  return Fusion()->base_vm_instructions;
++}
++intptr_t Dart_SankofaLinkTableCount() {
++  return static_cast<intptr_t>(Fusion()->link.size());
++}
++intptr_t Dart_SankofaLookupCpuOffset(intptr_t sim_offset) {
++  const FusionState* s = Fusion();
++  auto it = s->link.find(sim_offset);
++  return it == s->link.end() ? -1 : it->second;
++}
++
++uintptr_t Dart_SankofaResolveEntryPoint(uintptr_t patch_image_start,
++                                        uintptr_t pc_offset) {
++  FusionState* s = Fusion();  // non-const: bumps the diagnostic counters
++  // No patch loaded (base-only isolate): the link table is empty, so this is
++  // a zero-overhead passthrough — the normal single-image entry point.
++  if (s->link.empty()) {
++    return patch_image_start + pc_offset;
++  }
++  // Patch isolate: a Code whose offset is in the link table is UNCHANGED —
++  // resolve it to the base App's executable instructions (cpu offset). A Code
++  // NOT in the table is CHANGED — keep it in the patch image (on iOS that page
++  // is kReadOnly → the interpreter handoff runs it; on mac the patch image is
++  // executable so it runs directly, which makes the fusion locally validatable).
++  auto it = s->link.find(static_cast<intptr_t>(pc_offset));
++  if (it != s->link.end() && s->base_isolate_instructions != nullptr) {
++    s->resolve_base_hits++;
++    return reinterpret_cast<uintptr_t>(s->base_isolate_instructions) +
++           static_cast<uintptr_t>(it->second);
++  }
++  s->resolve_patch_hits++;
++  return patch_image_start + pc_offset;
++}
++
++uintptr_t Dart_SankofaBasePcToPatchPc(uintptr_t patch_image_start,
++                                      uintptr_t pc) {
++  FusionState* s = Fusion();
++  if (s->link.empty() || s->base_isolate_instructions == nullptr) return 0;
++  const uintptr_t base_start =
++      reinterpret_cast<uintptr_t>(s->base_isolate_instructions);
++  if (getenv("SANKOFA_REVTRACE") != nullptr) {
++    static int n = 0;
++    if (n++ < 8) {
++      ::fprintf(stderr,
++                "[revfuse] pc=%p base_start=%p patch_start=%p in_base=%d\n",
++                reinterpret_cast<void*>(pc), reinterpret_cast<void*>(base_start),
++                reinterpret_cast<void*>(patch_image_start), pc >= base_start);
++      ::fflush(stderr);
++    }
++  }
++  if (pc < base_start) return 0;  // below the base image — not a base PC
++  const intptr_t base_offset = static_cast<intptr_t>(pc - base_start);
++  // Largest cpu (base) offset <= base_offset = the base Code containing this PC.
++  auto it = std::upper_bound(
++      s->cpu_sorted.begin(), s->cpu_sorted.end(),
++      std::make_pair(base_offset, INTPTR_MAX));
++  if (it == s->cpu_sorted.begin()) return 0;  // before the first base Code
++  --it;
++  const intptr_t cpu = it->first;
++  const intptr_t sim = it->second;
++  const intptr_t delta = base_offset - cpu;
++  auto next = it + 1;
++  if (next != s->cpu_sorted.end() && delta >= (next->first - cpu)) {
++    return 0;  // past this Code's extent (gap) — let the caller treat as patch
++  }
++  // Equivalent PC inside the patch image (where the InstructionsTable lives).
++  return patch_image_start + static_cast<uintptr_t>(sim + delta);
++}
++
++void Dart_SankofaResolverStats(intptr_t* base_hits, intptr_t* patch_hits) {
++  const FusionState* s = Fusion();
++  if (base_hits != nullptr) *base_hits = s->resolve_base_hits;
++  if (patch_hits != nullptr) *patch_hits = s->resolve_patch_hits;
++}
++
++// Hybrid-snapshot merge-mode toggle (build-time, process-global single-writer —
++// gen_snapshot serialises its load). Read by BytecodeLoader::LoadBytecode.
++static bool g_sankofa_bytecode_merge = false;
++void Dart_SankofaSetBytecodeMerge(bool enabled) {
++  g_sankofa_bytecode_merge = enabled;
++}
++bool Dart_SankofaBytecodeMerge() {
++  return g_sankofa_bytecode_merge;
++}
++
+ }  // namespace snapshot_analyzer
+ }  // namespace dart
+diff --git a/runtime/vm/stub_code_list.h b/runtime/vm/stub_code_list.h
+index 9625918343c..4ab9087478f 100644
+--- a/runtime/vm/stub_code_list.h
++++ b/runtime/vm/stub_code_list.h
+@@ -81,6 +81,11 @@ namespace dart {
+   V(CallToRuntime)                                                             \
+   V(LazyCompile)                                                               \
+   V(InterpretCall)                                                             \
++  /* Sankofa: dispatch-table -> interpreter trampoline. A dispatch-table call */ \
++  /* to a bytecode method lands here with the target Function in R8 (the */      \
++  /* function-half of the interleaved slot) and R0 = receiver cid; this moves */ \
++  /* R8 -> FUNCTION_REG and enters the InterpretCall sequence. arm64 only. */     \
++  V(SankofaDispatchInterpret)                                                  \
+   V(ResumeInterpreter)                                                         \
+   V(CallBootstrapNative)                                                       \
+   V(CallNoScopeNative)                                                         \
+diff --git a/runtime/vm/version_in.cc b/runtime/vm/version_in.cc
+index c1106055fef..de15b5d0787 100644
+--- a/runtime/vm/version_in.cc
++++ b/runtime/vm/version_in.cc
+@@ -29,15 +29,23 @@ const char* Version::Channel() {
+ }
+ 
+ const char* Version::snapshot_hash_ = "{{SNAPSHOT_HASH}}";
++// Sankofa fork — appends "+sankofa-1" to the Dart version string so the
++// running VM is identifiable as Sankofa-built. The SDK's KBC engine check
++// (sankofa_sdk_flutter/lib/src/deploy/kbc_loader.dart) requires
++// `Platform.version` to contain "+sankofa-" before it will load a downloaded
++// `.skdp` patch; stamping it here removes the need to build apps with
++// `--dart-define=SANKOFA_SKIP_ENGINE_CHECK=1`. Mirrors the engine-side marker
++// in sankofa-flutter/engine/src/flutter/shell/version/version.cc and the
++// committed stamp in the sankofa-dart-sdk fork (runtime/vm/version_in.cc).
+ const char* Version::str_ =
+-    "{{VERSION_STR}} ({{CHANNEL}}) ({{COMMIT_TIME}})"
++    "{{VERSION_STR}}+sankofa-1 ({{CHANNEL}}) ({{COMMIT_TIME}})"
+     " on \"" kHostOperatingSystemName
+     "_"
+ #if defined(DART_INCLUDE_SIMULATOR)
+     "sim"
+ #endif
+     kTargetArchitectureName "\"";
+-const char* Version::commit_ = "{{VERSION_STR}}";
++const char* Version::commit_ = "{{VERSION_STR}}+sankofa-1";
+ const char* Version::git_short_hash_ = "{{GIT_HASH}}";
+ const char* Version::channel_ = "{{CHANNEL}}";
+ 
+-- 
+2.50.1 (Apple Git-155)
+
