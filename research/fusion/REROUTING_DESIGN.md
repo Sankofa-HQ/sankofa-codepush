@@ -4,6 +4,63 @@
 > bytecode-shaped patch snapshot is STILL REQUIRED. Companion plan:
 > [`../IOS_DATA_ONLY_PORT_PLAN.md`](../IOS_DATA_ONLY_PORT_PLAN.md).**
 >
+> ## ✅ 2026-06-29 — FLAG-FREE VIRTUAL ENTRY BOUNDARY PROVEN ON HOST (dispatch-funcreg).
+> The replacement for the dead flag is built and proven device-free. Mechanism:
+> the AOT dispatch table becomes INTERLEAVED `[entry_point, function_ptr]` pairs;
+> arm64 `EmitDispatchTableCall` loads the function-half into a scratch reg (R8);
+> a bytecode method's slot points at a new base-resident `SankofaDispatchInterpret`
+> trampoline (`mov R0,R8; <InterpretCall body>`) so FUNCTION_REG is set before the
+> interpreter runs. The slot's function-half is populated either at deserialize
+> (fusion patch: `dispatch_table_function_entries`, HasBytecode-gated → zero
+> base-app bloat) or at boot via `Dart_SankofaRepointDispatchToInterpret` (scan
+> for the pre-transplant entry → trampoline + function-half).
+>
+> **Proof (no-JIT `analyze_snapshot`/`dartaotruntime_product`, NO flag), override_in_place harness:**
+> after transplanting `Widget.build`→bytecode, an UNCHANGED base-AOT
+> `render(w)=>w.build()` (a baked DISPATCH-TABLE call) went
+> `render-> BASE-UI` → (repoint, slots=1) → **`render-> PATCH-UI-FIXED`**. Plus a
+> regression (polymorphic `woof/meow/moo`) confirms the interleaved table doesn't
+> break native dispatch. This is exactly the framework→`build()` case the flag was
+> for — now flag-free, App-Store-legal (base-resident, no runtime codegen, no
+> executable patch memory). Files (branch `feat/sankofa-dispatch-funcreg`):
+> `dispatch_table.{h,cc}`, `object_store.h`, `dispatch_table_generator.{h,cc}`,
+> `precompiler.cc`, `app_snapshot.cc` (stride + fill helper),
+> `stub_code_list.h` + `stub_code_compiler_arm64.cc` (trampoline),
+> `flow_graph_compiler_arm64.cc` (R8 load), `il.cc` (always args-desc),
+> `sankofa_codepush_emit.cc` (repoint APIs + SDTL stride). NEXT: iOS rebuild +
+> device round-trip (boot hook transplant + repoint).
+>
+> ## 🛑 2026-06-29 — DEVICE FINDING: `SANKOFA_NO_TABLE_DISPATCH` is DEAD at full-app scale.
+> The ⭐⭐ 2026-06-26 "virtual entry boundary proven device-free" claim below was
+> proven only in the tiny `override_in_place` host harness. **On the iPhone 14 Pro
+> it does NOT survive the real Flutter framework.** A full app built with
+> `SANKOFA_NO_TABLE_DISPATCH=1` and **NO patch staged** (pure base boot) SIGSEGVs
+> at startup: `EXC_BAD_ACCESS` at `0xffffffffffffffff`, faulting in App.framework
+> on the main thread inside `Dart_InvokeClosure → RunMicrotasks`, in a tight
+> recursive dispatch cycle (offsets `2007016→186720→187672→187392→178504→177772→
+> 2008332→190948` repeat). Clean A/B: the SAME app WITHOUT the flag boots and is
+> stable (RUNG-2). So the flag corrupts megamorphic/polymorphic IC dispatch in
+> framework startup; the `DoICDataMissAOT` HasBytecode-skip fixed only the
+> monomorphic break, not this. **Conclusion: the global switchable-call flag is
+> not a viable virtual-entry-boundary solution for real apps — it is also a
+> whole-app codegen change we'd never ship in production anyway.**
+>
+> **What this changes (and does NOT change):**
+> - Still proven on DEVICE, flag-free: fresh-dispatch reroute AND the **static
+>   cascade interior** (`sankofaVerify`(bytecode)→`risky`(bytecode) returned
+>   `value=safe-default`, i.e. the bytecode caller reached the bytecode callee —
+>   no crash, so NOT the base-AOT `risky`).
+> - Still open = the **ENTRY BOUNDARY**: an UNCHANGED base-AOT function calling
+>   into changed code. Static sub-case → solvable flag-free TODAY by reshipping
+>   the app-internal caller chain as bytecode up to a fresh-dispatch root
+>   (cascade-as-bytecode; patch-size cost, no engine change). Virtual sub-case
+>   (Flutter framework → your `build()`) → the genuine remaining frontier; needs
+>   **base-resident** indirection emitted at base-build time (executable in the
+>   signed app, no runtime codegen → App-Store legal): a dispatch path that LOADS
+>   FUNCTION_REG so a slot can point at an interpret trampoline. This replaces the
+>   dead flag. (Items #2 in `cli_v0/ENGINE_INTEGRATION.md` and runbook step 3 are
+>   superseded accordingly.)
+>
 > FUSION-vs-override stands (not re-litigating). And fusion genuinely NEEDS the
 > changed functions to be **bytecode-shaped in the patch snapshot**: on iOS the
 > patch image is `kReadOnly` (no PROT_EXEC), so a changed function's *native*
