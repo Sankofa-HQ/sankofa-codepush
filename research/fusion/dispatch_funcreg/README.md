@@ -122,9 +122,30 @@ A bytecode patch can only call what the BASE app retained in its AOT snapshot:
   So list/map literals + multi-part string interpolation — which lower to PRIVATE
   impls (`_GrowableList`, `_StringBase._interpolate`) — still fail to resolve.
 
-So fully-arbitrary patches need either (a) curated retention of the private impls
-language features lower to (a maintenance surface), or (b) the **data-only
-fusion** path (patch = diff vs the SAME base → reuses its exact code, private
-impls included → ZERO retention needed). Fusion is the structurally cleaner
-answer for arbitrary logic. `devicepatch/patch_module.dart` here is the test-#1
-public-API body; the app must be built with the `--dynamic-interface` flag above.
+### ⭐ Test #2 (2026-06-30) — ARBITRARY LOGIC works; the retention ceiling was a NON-ISSUE
+
+The "private-impl ceiling" above was a false alarm caused by not re-testing. The
+Dart dynamic-modules feature runs `discoverLanguageImplPragmasInCoreLibraries`
+**unconditionally** whenever `--dynamic-interface` is active
+(`dynamic_interface_annotator.dart:34`). It walks the platform libraries and
+auto-retains exactly the PRIVATE impls language features lower to
+(`_GrowableList`, `_StringBase._interpolate`, …) — no manual curation.
+
+Proven on iPhone 14 Pro against the `--dynamic-interface` app:
+
+```
+live panelStatus() => render-> PATCH-UI-FIXED computed sum=55 n=5 [i1+i2+i3+i4+i5]
+```
+
+`_patchedLabel` uses a **list literal + .add + .join + multi-part interpolation**
+— the exact constructs that failed before the app was built `--dynamic-interface`
+— and they run live through the interpreter, no JIT. `devicepatch/patch_module.dart`
+is this arbitrary-logic body.
+
+**So: fully-arbitrary patch logic works via dispatch-funcreg + `--dynamic-interface`
+TODAY, with zero manual private-impl curation.** The only requirement is building
+the app `--dynamic-interface` (the auto language-impl discovery handles the rest).
+
+Data-only **fusion** is therefore an *optimization* (tiny offset-linked patches +
+unchanged code stays native AOT, not interpreted), **not** a prerequisite for
+arbitrary logic. See `../RUNG3_DESIGN.md` for the (now optional) fusion path.

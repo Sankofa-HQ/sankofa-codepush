@@ -10,30 +10,33 @@
 //
 // Mapped onto Panel.label / Panel2.label by _sankofaManifest. A top-level body
 // ignores the receiver, so the instance-method arg (`this`) is harmless.
-// No list / no multi-part interpolation (those synthesize _GrowableList, which a
-// non-dynamic-interface app tree-shakes). Uses only loop + int arithmetic +
-// int.toString + String.+ — all heavily used by Flutter, so retained. sum=55.
+// FULL arbitrary logic: list literal + .add + .join + multi-part string
+// interpolation (the constructs that lower to PRIVATE impls _GrowableList /
+// _StringBase._interpolate). Tests whether the app's --dynamic-interface build
+// auto-retained those impls via discoverLanguageImplPragmasInCoreLibraries — if
+// so, this resolves with NO manual private-impl curation. sum=55, parts=i1..i5.
 @pragma('vm:entry-point')
 @pragma('vm:never-inline')
 String _patchedLabel() {
+  final List<String> parts = <String>[];
   int sum = 0;
   for (int i = 1; i <= 5; i++) {
+    parts.add('i$i');
     sum += i * i;
   }
-  return 'PATCH-UI-FIXED computed sum=' +
-      sum.toString() +
-      ' next=' +
-      (sum + 1).toString();
+  return 'PATCH-UI-FIXED computed sum=$sum n=${parts.length} [${parts.join("+")}]';
 }
 
 @pragma('vm:entry-point')
 @pragma('vm:never-inline')
 String _patchedLabel2() {
+  final List<int> fs = <int>[];
   int f = 1;
   for (int i = 1; i <= 5; i++) {
     f *= i;
+    fs.add(f);
   }
-  return 'PATCH-UI-FIXED-2 fact5=' + f.toString();
+  return 'PATCH-UI-FIXED-2 fact5=$f seq=${fs.join(",")}';
 }
 
 // Manifest = comma-separated "target=source" pairs (a STRING -> no _GrowableList).

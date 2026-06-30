@@ -6,6 +6,32 @@ app — on Sankofa's own Flutter engine.**
 
 Status: design + plan. Rungs 1–2 proven; this is rung-3.
 
+> ## ⭐ SUPERSEDING UPDATE (2026-06-30): fusion is now an OPTIMIZATION, not the path to arbitrary logic
+>
+> The premise that drove this doc — that arbitrary patch logic NEEDS fusion to
+> escape a private-impl "retention ceiling" — turned out to be **false**. The
+> `--dynamic-interface` build auto-runs `discoverLanguageImplPragmasInCoreLibraries`,
+> which retains the private impls language features lower to (`_GrowableList`,
+> `_StringBase._interpolate`). **Arbitrary logic (list literals + interpolation +
+> control flow + method calls) is PROVEN live on the iPhone via the
+> dispatch-funcreg path** (`dispatch_funcreg/README.md` Test #2:
+> `render-> PATCH-UI-FIXED computed sum=55 n=5 [i1+i2+i3+i4+i5]`). No fusion VM
+> surgery, no manual curation.
+>
+> Two further dead premises corrected during this recon:
+> - The precompiler does NOT auto-walk a bytecode function's callees
+>   (`ProcessFunction`/`CompileFunction` early-return before `AddCalleesOf`), so
+>   fusion would have needed the SAME retention anyway — it was never the
+>   retention escape hatch.
+> - The β.3 interpreter is complete enough for real logic (the earlier "interpreter
+>   incompleteness" was the buffer-lifetime bug, now fixed).
+>
+> **Fusion's remaining value = an OPTIMIZATION:** offset-linked patches are tiny
+> (99.6% reuse base) and unchanged code keeps running native AOT instead of
+> interpreted (faster, lower memory). Pursue it for production efficiency, NOT as
+> the enabler of arbitrary logic. The rest of this doc remains the fusion rung-3
+> plan; it's now an optional optimization track.
+
 ---
 
 ## 0. The dream (north star — don't lose it)
