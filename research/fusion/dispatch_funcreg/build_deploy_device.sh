@@ -17,7 +17,8 @@ echo "### 1. flutter build ios (vs new local engine) ###"
 cd "$APPDIR"
 "$SF/bin/flutter" clean >/dev/null 2>&1
 "$SF/bin/flutter" build ios --release \
-  --local-engine=ios_release --local-engine-host=mac_release_arm64 2>&1 | tail -3
+  --local-engine=ios_release --local-engine-host=mac_release_arm64 \
+  --extra-front-end-options=--dynamic-interface="$APPDIR/sankofa_dynamic_interface.yaml" 2>&1 | tail -3
 
 echo "### 2. swap fresh Flutter.framework + re-sign ###"
 rsync -a --delete "$ENGSRC/out/ios_release/Flutter.framework/" "$APP/Frameworks/Flutter.framework/"

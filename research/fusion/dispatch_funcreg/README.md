@@ -97,3 +97,34 @@ is retained by the `Bytecode -> Function` for the isolate group's lifetime, so
 the buffer is unmapped only at isolate shutdown — no leak, no use-after-free.
 
 So the β.3 interpreter was never the blocker; it was a buffer-lifetime bug.
+
+## Test #1 — non-trivial logic runs live (2026-06-30)
+
+A real patched body (loop + int arithmetic + `int.toString` + `String.+`) reached
+LIVE through the interpreter during the render:
+
+```
+live panelStatus() => render-> PATCH-UI-FIXED computed sum=55 next=56
+```
+
+`sum=55` (1²+2²+3²+4²+5²) + `next=56` are COMPUTED — only running the loop +
+arithmetic in the interpreter can produce them. So the interpreter handles real
+control flow / arithmetic / method calls, not just constant returns.
+
+### The real boundary = SDK RETENTION (not the interpreter)
+
+A bytecode patch can only call what the BASE app retained in its AOT snapshot:
+- The app MUST be built with `--dynamic-interface` (else EVERY dart:core callable
+  is tree-shaken — even `int.toString`). Build flag:
+  `flutter build ios --release --extra-front-end-options=--dynamic-interface=<app>/sankofa_dynamic_interface.yaml`.
+- `--dynamic-interface` with `library: dart:core` retains PUBLIC members only
+  (`dynamic_interface_annotator.dart` `_visitPublicMembers` skips `isPrivate`).
+  So list/map literals + multi-part string interpolation — which lower to PRIVATE
+  impls (`_GrowableList`, `_StringBase._interpolate`) — still fail to resolve.
+
+So fully-arbitrary patches need either (a) curated retention of the private impls
+language features lower to (a maintenance surface), or (b) the **data-only
+fusion** path (patch = diff vs the SAME base → reuses its exact code, private
+impls included → ZERO retention needed). Fusion is the structurally cleaner
+answer for arbitrary logic. `devicepatch/patch_module.dart` here is the test-#1
+public-API body; the app must be built with the `--dynamic-interface` flag above.
