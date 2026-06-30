@@ -61,12 +61,39 @@ pointers, launch) → pull `sankofa_boot_result.txt`. `stage_device.sh base`
 clears. Host gate: `run_reroute.sh` / `hostcheck.sh` against `/tmp/appbase.aot`
 (mac gen_snapshot of the app's `app.dill`) reproduces device behavior exactly.
 
-## Known limit (next frontier)
+## Live render-path reroute — ALSO PROVEN on device (2026-06-30)
 
 Driving the rerouted call **live during the full Flutter render** (`panelStatus()`
-in `build()`) crashes the β.3 interpreter: `interpreter.cc:3426 UNIMPLEMENTED
-opcode=0` (zero bytecode) after a 125-deep framework recursion — NOT over-repoint
-(`repointed=2` is exactly the two correct slots). So this build exercises the
-reroute via the boot-hook fresh invoke (simple context, interpreter solid) and
-the UI displays the recorded result. A fully-live render reroute needs β.3
-interpreter completeness.
+in `build()`) now works on the iPhone 14 Pro:
+
+```
+live panelStatus() => render-> PATCH-UI-FIXED-V2-LIVE   (green, no crash)
+```
+
+`app/main_live_render.dart` calls the rerouted dispatch INSIDE `build()`, so the
+unchanged base-AOT dispatch-table call `render-> Panel.label()` reaches the
+downloaded bytecode through the interpreter during the real render.
+
+### What it took (the bug, found by one enriched-diagnostic device run)
+
+Earlier this crashed with `interpreter.cc Trap op=0` (PC on a zero byte). The
+enriched Trap FATAL (commit `aba7b85a952`: prints fn / has_bc / bytecode
+base+size / pc_off / in_range / depth) pinpointed it in ONE run:
+
+```
+Trap op=0 fn=Panel.label has_bc=1 size=7 pc_off=0 in_range=1 depth=0
+```
+
+A *valid* Bytecode object whose `instructions_` pointed at **zeroed memory**.
+Root cause: the boot hook (`SankofaApplyBootPatch`) loaded the patch with a LOCAL
+`fml::FileMapping` — munmap'd when the hook returned — but the transplanted
+bytecode's `instructions_` point INTO that mapping for the whole app run. The
+boot-context self-verify worked only because it runs *before* the unmap; the live
+render runs `build()` *after* it → dangling → Trap.
+
+**Fix** (engine-shell commit `393eccfc374`): hand the mapping's ownership to the
+`ExternalTypedData` via `Dart_NewExternalTypedDataWithFinalizer`. The typed data
+is retained by the `Bytecode -> Function` for the isolate group's lifetime, so
+the buffer is unmapped only at isolate shutdown — no leak, no use-after-free.
+
+So the β.3 interpreter was never the blocker; it was a buffer-lifetime bug.
