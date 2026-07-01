@@ -66,8 +66,10 @@ changed = app_changed  # the manifest/link% are about the app patch set
 print(f"base fns={len(base)} patch fns={len(patch)} | total changed (ship as bytecode)={len(changed)}")
 print(f"link% by count = {100.0*(len(patch)-len(changed))/len(patch):.2f}%")
 print("--- app-named changed functions (the bytecode cascade set) ---")
-for f in sorted(app_changed, key=lambda x: x['name']):
-    print(f"  {f['name']:14s} subgraph={f['subgraph_hash']}  self={f['self_hash']}")
+def qn(f):
+    return f.get('qualified_name') or f['name']
+for f in sorted(app_changed, key=qn):
+    print(f"  {qn(f):20s} subgraph={f['subgraph_hash']}  self={f['self_hash']}")
 other = len(changed) - len(app_changed)
 if other:
     print(f"  (+{other} private/SDK fns whose transitive hash shifted)")
@@ -78,9 +80,14 @@ manifest = {
     "link_pct": round(100.0*(len(patch)-len(changed))/len(patch), 2),
     "changed_count": len(changed),
     "transplant": [
-        {"name": f["name"], "subgraph_hash": f["subgraph_hash"]}
+        # `target` is the qualified name the boot hook resolves + reroutes
+        # (Class.method, or bare for top-level). Same-name transplant: the
+        # patch module ships the changed fn under the same name.
+        {"target": qn(f), "name": f["name"], "subgraph_hash": f["subgraph_hash"]}
         for f in changed
     ],
+    # The comma-separated _sankofaManifest string the boot hook parses directly.
+    "sankofa_manifest": ",".join(qn(f) for f in changed),
 }
 json.dump(manifest, open(sys.argv[3], "w"), indent=2)
 print(f"\nwrote manifest -> {sys.argv[3]} ({len(changed)} transplant targets)")

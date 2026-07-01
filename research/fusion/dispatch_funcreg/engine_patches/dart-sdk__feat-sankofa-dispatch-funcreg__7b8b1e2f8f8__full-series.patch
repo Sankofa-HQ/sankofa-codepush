@@ -1,7 +1,7 @@
 From 48879a851a3bf53d16bd0e16d0f78ed91870f5b2 Mon Sep 17 00:00:00 2001
 From: saytoonz <35128520+saytoonz@users.noreply.github.com>
 Date: Fri, 26 Jun 2026 12:42:36 +0000
-Subject: [PATCH 1/8] bin(analyze_snapshot): cascade rerouting probe 2b
+Subject: [PATCH 1/9] bin(analyze_snapshot): cascade rerouting probe 2b
  (caller<-callerViaPatched)
 
 Adds a probe that transplants the CALLER itself with a bytecode body calling the
@@ -3217,7 +3217,7 @@ index 00000000000..26d4f19df39
 From 15da01b59e8295174cb8b38231df13b3111690c3 Mon Sep 17 00:00:00 2001
 From: saytoonz <35128520+saytoonz@users.noreply.github.com>
 Date: Fri, 26 Jun 2026 12:48:26 +0000
-Subject: [PATCH 2/8] bin(analyze_snapshot): virtual cascade probe 3b
+Subject: [PATCH 2/9] bin(analyze_snapshot): virtual cascade probe 3b
  (renderNew<-renderNewViaPatched)
 
 Transplants renderNew with a bytecode body doing a virtual ws[0].build(); proves
@@ -3276,7 +3276,7 @@ index b134a2b3e62..9af91147511 100644
 From cef2e95a7fdbbde310cc80250c05965dd88a0e97 Mon Sep 17 00:00:00 2001
 From: saytoonz <35128520+saytoonz@users.noreply.github.com>
 Date: Fri, 26 Jun 2026 13:56:18 +0000
-Subject: [PATCH 3/8] vm: virtual entry-boundary rerouting for bytecode targets
+Subject: [PATCH 3/9] vm: virtual entry-boundary rerouting for bytecode targets
  (no trampoline)
 
 Two base-engine changes (both NON-version-hash, iOS-viable, base-resident) that
@@ -3358,7 +3358,7 @@ index 342a3847b84..f064d73c955 100644
 From 70ba9c55cbcfb2cf37bfb15c351d91dde2114c6f Mon Sep 17 00:00:00 2001
 From: saytoonz <35128520+saytoonz@users.noreply.github.com>
 Date: Fri, 26 Jun 2026 14:57:19 +0000
-Subject: [PATCH 4/8] bin(analyze_snapshot): generic manifest-driven apply
+Subject: [PATCH 4/9] bin(analyze_snapshot): generic manifest-driven apply
  (--patch_fns/--patch_invoke)
 
 With --bytecode_patch, --patch_fns=a,b,c transplants the patch module's same-named
@@ -3442,7 +3442,7 @@ index 9af91147511..670363ddab2 100644
 From d6d57e8d5f4b753071381c577266bb978b1340d5 Mon Sep 17 00:00:00 2001
 From: saytoonz <35128520+saytoonz@users.noreply.github.com>
 Date: Fri, 26 Jun 2026 15:32:51 +0000
-Subject: [PATCH 5/8] vm: analyzer emits library_uri; harness apply shows
+Subject: [PATCH 5/9] vm: analyzer emits library_uri; harness apply shows
  BEFORE (crash) state
 
 - sankofa_snapshot_analyzer.cc: emit per-function library_uri (owner class's
@@ -3850,7 +3850,7 @@ index 26d4f19df39..29008cc4d5d 100644
 From 8adf04b35bd7bd09decfa2fe2c946626d92e03ac Mon Sep 17 00:00:00 2001
 From: saytoonz <35128520+saytoonz@users.noreply.github.com>
 Date: Fri, 26 Jun 2026 16:19:07 +0000
-Subject: [PATCH 6/8] vm(precompiler): drop noisy [sankofa-cf] grind
+Subject: [PATCH 6/9] vm(precompiler): drop noisy [sankofa-cf] grind
  diagnostic; keep keep-bytecode guard
 
 Removes the unconditional debug print that fired for every 'compute'-named fn
@@ -3936,7 +3936,7 @@ index a1501f76cdb..170d192898c 100644
 From 05dea5818451799a1ef17fc8f66dc63c9e7370cb Mon Sep 17 00:00:00 2001
 From: Sankofa <dev@sankofa.dev>
 Date: Mon, 29 Jun 2026 23:21:53 +0000
-Subject: [PATCH 7/8] dispatch-funcreg: flag-free virtual-entry-boundary
+Subject: [PATCH 7/9] dispatch-funcreg: flag-free virtual-entry-boundary
  code-push (proven on iPhone)
 
 Replaces the dead SANKOFA_NO_TABLE_DISPATCH flag (which SIGSEGV'd the full
@@ -6035,7 +6035,7 @@ index c1106055fef..de15b5d0787 100644
 From aba7b85a9524a502606d5e080013cf604aa0665f Mon Sep 17 00:00:00 2001
 From: Sankofa <dev@sankofa.dev>
 Date: Tue, 30 Jun 2026 15:53:23 +0000
-Subject: [PATCH 8/8] dispatch-funcreg: enriched interpreter Trap diagnostic
+Subject: [PATCH 8/9] dispatch-funcreg: enriched interpreter Trap diagnostic
  (fn/bytecode/pc_off/depth)
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -6110,6 +6110,83 @@ index db6afb4c11d..6b202f774b9 100644
      DISPATCH();
    }
  
+-- 
+2.50.1 (Apple Git-155)
+
+
+From 7b8b1e2f8f861ff60615122eb77c99f4608cd016 Mon Sep 17 00:00:00 2001
+From: Sankofa <dev@sankofa.dev>
+Date: Wed, 1 Jul 2026 12:47:07 +0000
+Subject: [PATCH 9/9] analyzer(--shorebird): emit qualified_name (Class.method)
+ for code-push manifest
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+The bare `name` ("label") can't target a specific method. Added qualified_name:
+"Class.method" for methods, bare for top-level fns (matches ResolveSankofaFn's
+'.' split). This is what the auto-diff manifest targets so `sankofa patch`
+reroutes the exact changed method — proven: a 1-method change yields
+sankofa_manifest="Panel.label", the exact string the boot hook consumes.
+
+Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>
+---
+ runtime/vm/sankofa_snapshot_analyzer.cc | 24 +++++++++++++++++++++---
+ 1 file changed, 21 insertions(+), 3 deletions(-)
+
+diff --git a/runtime/vm/sankofa_snapshot_analyzer.cc b/runtime/vm/sankofa_snapshot_analyzer.cc
+index 29008cc4d5d..f1945598ba7 100644
+--- a/runtime/vm/sankofa_snapshot_analyzer.cc
++++ b/runtime/vm/sankofa_snapshot_analyzer.cc
+@@ -470,27 +470,45 @@ void SankofaSnapshotAnalyzer::EmitCode(intptr_t index_in_entries,
+                                        uword instruction_base) {
+   js_.OpenObject();
+ 
+-  // name
+-  // Mirrors DumpCode in analyze_snapshot_api_impl.cc.
++  // name + qualified_name. `name` mirrors DumpCode (bare, e.g. "label").
++  // `qualified_name` is what the code-push manifest targets so the boot hook
++  // resolves the exact method: "Class.method" for methods, bare for top-level
++  // functions (ResolveSankofaFn splits on '.'). Without this the manifest can't
++  // tell Panel.label from any other `label`.
+   if (code.owner() != Object::null()) {
+     const auto& owner = Object::Handle(code.owner());
+     if (owner.IsFunction()) {
+-      js_.PrintProperty("name", Function::Cast(owner).UserVisibleNameCString());
++      const Function& fn = Function::Cast(owner);
++      const char* method = fn.UserVisibleNameCString();
++      js_.PrintProperty("name", method);
++      const Class& cls = Class::Handle(thread_->zone(), fn.Owner());
++      if (!cls.IsNull() && !cls.IsTopLevel()) {
++        char qbuf[512];
++        std::snprintf(qbuf, sizeof(qbuf), "%s.%s",
++                      cls.ScrubbedNameCString(), method);
++        js_.PrintProperty("qualified_name", qbuf);
++      } else {
++        js_.PrintProperty("qualified_name", method);
++      }
+     } else if (owner.IsClass()) {
+       char buf[256];
+       std::snprintf(buf, sizeof(buf), "new %s",
+                     Class::Cast(owner).ScrubbedNameCString());
+       js_.PrintProperty("name", buf);
++      js_.PrintProperty("qualified_name", buf);
+     } else if (owner.IsAbstractType()) {
+       char buf[256];
+       std::snprintf(buf, sizeof(buf), "as %s",
+                     AbstractType::Cast(owner).ScrubbedNameCString());
+       js_.PrintProperty("name", buf);
++      js_.PrintProperty("qualified_name", buf);
+     } else {
+       js_.PrintProperty("name", "<unknown>");
++      js_.PrintProperty("qualified_name", "<unknown>");
+     }
+   } else {
+     js_.PrintProperty("name", "<stub>");
++    js_.PrintProperty("qualified_name", "<stub>");
+   }
+ 
+   // [sankofa] library_uri — lets the CLI diff scope the changed set to the app's
 -- 
 2.50.1 (Apple Git-155)
 
