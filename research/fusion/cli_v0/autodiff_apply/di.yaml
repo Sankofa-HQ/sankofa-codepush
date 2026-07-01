@@ -1,0 +1,4 @@
+callable:
+  - library: 'dart:core'
+extendable:
+  - library: 'dart:core'
