@@ -50,7 +50,17 @@ changed = [f for f in patch if f['subgraph_hash'] not in base_hashes]
 # functions (SDK/platform code lives in the base engine, never patched), so SDK
 # hash drift across independent builds is irrelevant noise. Keep app-lib fns.
 def app(f):
-    return f.get('library_uri', '').startswith('dev-dart-app')
+    # App code = NOT the SDK/framework (those live in the base engine and are
+    # never patched). Covers local file:// builds (dev), the dev-dart-app
+    # fs-scheme (harness), and real apps (package:<app>/...).
+    uri = f.get('library_uri', '')
+    if not uri:
+        return False
+    if uri.startswith('dart:'):
+        return False
+    if uri.startswith('package:flutter') or uri.startswith('package:sky_engine'):
+        return False
+    return True
 app_changed = [f for f in changed if app(f)]
 changed = app_changed  # the manifest/link% are about the app patch set
 print(f"base fns={len(base)} patch fns={len(patch)} | total changed (ship as bytecode)={len(changed)}")
