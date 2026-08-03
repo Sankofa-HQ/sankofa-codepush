@@ -46,7 +46,7 @@ runs:
   using: "composite"
   steps:
     - name: 🎯 Setup Dart
-      uses: dart-lang/setup-dart@v1
+      uses: dart-lang/setup-dart@v1.7.2
       with:
         sdk: ${{inputs.dart_sdk}}
 
@@ -81,7 +81,7 @@ runs:
       run: echo "package_name=${PACKAGE_PATH##*/}" >> $GITHUB_OUTPUT
 
     - name: 📊 Upload Coverage
-      uses: codecov/codecov-action@v6
+      uses: codecov/codecov-action@v7
       with:
         flags: ${{ steps.split.outputs.package_name }}
         token: ${{ inputs.codecov_token }}

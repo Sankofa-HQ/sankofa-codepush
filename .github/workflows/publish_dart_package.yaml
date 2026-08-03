@@ -31,7 +31,7 @@ jobs:
 
     steps:
       - name: 📚 Git Checkout
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: 🐳 Run Redis
         if: inputs.needs_redis
@@ -40,7 +40,7 @@ jobs:
           docker run --name test_redis -d -p 6379:6379 --rm -e REDIS_ARGS="--requirepass password" redis/redis-stack-server:latest
 
       - name: 🎯 Setup Dart
-        uses: dart-lang/setup-dart@v1
+        uses: dart-lang/setup-dart@v1.7.2
         with:
           sdk: stable
 
