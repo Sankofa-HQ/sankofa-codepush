@@ -28,11 +28,11 @@ jobs:
       sankofa_redis_client: ${{ steps.filter.outputs.sankofa_redis_client }}
       stripe_api: ${{ steps.filter.outputs.stripe_api }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           # Full history so dorny/paths-filter can diff on push events.
           fetch-depth: 0
-      - uses: dart-lang/setup-dart@v1
+      - uses: dart-lang/setup-dart@v1.7.2
       - run: dart pub global activate sankofa_ci
       - name: Verify CI coverage
         run: sankofa_ci verify
@@ -221,7 +221,7 @@ jobs:
     name: CSpell
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           submodules: recursive
       - uses: streetsidesoftware/cspell-action@v8
