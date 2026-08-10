@@ -255,6 +255,12 @@ pub struct PatchCheckRequest {
     /// this field instead.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_patch_number: Option<usize>,
+    /// Product flavor of this build (empty = unflavored). Omitted when empty so
+    /// legacy unflavored apps + releases are unaffected; when present the server
+    /// only offers same-flavor patches to this device (mirrors the KBC path's
+    /// /api/deploy/check flavor query + gating.go).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub flavor: String,
 }
 
 impl PatchCheckRequest {
@@ -271,6 +277,7 @@ impl PatchCheckRequest {
             arch: current_arch().to_string(),
             client_id: client_id.to_string(),
             current_patch_number,
+            flavor: config.flavor.clone(),
         }
     }
 }
@@ -416,6 +423,7 @@ mod tests {
                 arch: "".to_string(),
                 client_id: "".to_string(),
                 current_patch_number: None,
+                flavor: "".to_string(),
             },
         );
         assert!(result.is_err());

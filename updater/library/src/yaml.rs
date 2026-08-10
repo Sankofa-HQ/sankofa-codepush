@@ -27,6 +27,10 @@ pub struct YamlConfig {
     pub patch_public_key: Option<String>,
     /// When to verify patch signatures. Defaults to "strict" (verify at boot time).
     pub patch_verification: Option<PatchVerificationMode>,
+    /// Product flavor (e.g. dev/staging/production). Optional; empty =
+    /// unflavored. Written by `sankofa release --flavor`; sent on the patch
+    /// check so the server only serves same-flavor patches to this device.
+    pub flavor: Option<String>,
 }
 
 impl YamlConfig {
@@ -42,6 +46,7 @@ impl YamlConfig {
         let mut auto_update: Option<bool> = None;
         let mut patch_public_key: Option<String> = None;
         let mut patch_verification: Option<PatchVerificationMode> = None;
+        let mut flavor: Option<String> = None;
 
         for line in yaml.lines() {
             let line = line.trim();
@@ -58,6 +63,7 @@ impl YamlConfig {
             match key {
                 "app_id" => app_id = Some(value.to_string()),
                 "channel" => channel = Some(value.to_string()),
+                "flavor" => flavor = Some(value.to_string()),
                 "base_url" => base_url = Some(value.to_string()),
                 "auto_update" => {
                     auto_update =
@@ -88,6 +94,7 @@ impl YamlConfig {
             auto_update,
             patch_public_key,
             patch_verification,
+            flavor,
         })
     }
 }
