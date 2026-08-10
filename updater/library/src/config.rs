@@ -117,6 +117,9 @@ pub struct UpdateConfig {
     pub file_provider: Box<dyn ExternalFileProvider>,
     pub patch_public_key: Option<String>,
     pub patch_verification: PatchVerificationMode,
+    /// Product flavor (empty = unflavored). Sent on the patch check so the
+    /// server scopes patches to this device's flavor.
+    pub flavor: String,
 }
 
 /// Returns Ok if the config was set successfully, Err if it was already set.
@@ -149,6 +152,7 @@ pub fn set_config(
                 .to_owned(),
             auto_update: yaml.auto_update.unwrap_or(true),
             app_id: yaml.app_id.to_string(),
+            flavor: yaml.flavor.as_deref().unwrap_or("").to_owned(),
             release_version: app_config.release_version.to_string(),
             libapp_path,
             base_url: yaml
@@ -229,6 +233,7 @@ mod tests {
             base_url: Some("fake_base_url".to_string()),
             patch_public_key: None,
             patch_verification: None,
+            flavor: None,
         }
     }
 
@@ -254,6 +259,7 @@ mod tests {
                 base_url: Some("fake_base_url".to_string()),
                 patch_public_key: Some("patch_public_key".to_string()),
                 patch_verification: None,
+                flavor: None,
             },
             NetworkHooks::default(),
         )?;
